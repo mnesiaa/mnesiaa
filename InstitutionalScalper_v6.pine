@@ -6,99 +6,123 @@
 
 //@version=6
 strategy(
-     title            = "Institutional Scalper Pro v1.3",
-     shorttitle       = "ISP v1.3",
-     overlay          = true,
-     pyramiding       = 0,
-     default_qty_type = strategy.percent_of_equity,
-     default_qty_value= 10,
-     initial_capital  = 100000,
-     commission_type  = strategy.commission.percent,
-     commission_value = 0.02,
-     slippage         = 2,
-     calc_on_every_tick = false,
-     process_orders_on_close = true
-     )
+     title             = "Institutional Scalper Pro v1.3",
+     shorttitle        = "ISP v1.3",
+     overlay           = true,
+     pyramiding        = 0,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2,
+     calc_on_every_tick        = false,
+     process_orders_on_close   = true)
+
+// ─────────────────────────────────────────────
+// ░░  HELPER FUNCTIONS  (must be global scope)
+// ─────────────────────────────────────────────
+
+// Format a price to 2 decimal places
+fmtP(float v) => str.tostring(math.round(v, 2))
+
+// Green-check / red-cross for debug table
+fmtOk(bool b) => b ? "✔" : "✗"
+
+// Draw one horizontal dashed level + a text label at the right end
+drawLevel(int x0, float price, int ext,
+          color lineCol, color bgCol, color txtCol, string txt) =>
+    line.new(x0, price, ext, price,
+         color = lineCol, style = line.style_dashed, width = 1)
+    label.new(ext, price, txt,
+         color       = bgCol,
+         textcolor   = txtCol,
+         style       = label.style_label_left,
+         size        = size.small,
+         xloc        = xloc.bar_index)
 
 // ─────────────────────────────────────────────
 // ░░  INPUTS
 // ─────────────────────────────────────────────
 
-var string GRP_SESSION = "Session Filter"
-i_useSession = input.bool(true, "Enable NY AM Session Filter", group=GRP_SESSION)
-i_showSessBG = input.bool(true, "Shade Session Background",    group=GRP_SESSION)
-i_sesStart   = input.int(930,  "Session Start (HHMM EST)",     group=GRP_SESSION)
-i_sesEnd     = input.int(1130, "Session End   (HHMM EST)",     group=GRP_SESSION)
+var string GRP_SES = "Session Filter"
+i_useSession = input.bool(true,  "Enable NY AM Session Filter", group = GRP_SES)
+i_showSessBG = input.bool(true,  "Shade Session Background",    group = GRP_SES)
+i_sesStart   = input.int(930,    "Session Start (HHMM EST)",    group = GRP_SES)
+i_sesEnd     = input.int(1130,   "Session End   (HHMM EST)",    group = GRP_SES)
 
 var string GRP_STR = "Structure (Zero-Lag Rolling)"
-i_nearLen    = input.int(15, "Near Structure Lookback (sweeps)",  minval=5,  maxval=60, group=GRP_STR)
-i_farLen     = input.int(40, "Far Structure Lookback (BOS/trend)",minval=10, maxval=200,group=GRP_STR)
-i_sweepWin   = input.int(3,  "Sweep Entry Window (bars)",         minval=1,  maxval=8,  group=GRP_STR)
+i_nearLen  = input.int(15, "Near Structure Lookback (sweeps)",   minval = 5,  maxval = 60,  group = GRP_STR)
+i_farLen   = input.int(40, "Far Structure Lookback (BOS/trend)", minval = 10, maxval = 200, group = GRP_STR)
+i_sweepWin = input.int(3,  "Sweep Entry Window (bars)",          minval = 1,  maxval = 8,   group = GRP_STR)
 
 var string GRP_FVG = "Fair Value Gap"
-i_fvgOn      = input.bool(true,  "Enable FVG",                 group=GRP_FVG)
-i_fvgMinATR  = input.float(0.2,  "Min FVG Size (ATR×)",        minval=0.05, step=0.05, group=GRP_FVG)
-i_fvgWin     = input.int(4,      "FVG Valid Window (bars)",    minval=1, maxval=10, group=GRP_FVG)
+i_fvgOn     = input.bool(true,  "Enable FVG",              group = GRP_FVG)
+i_fvgMinATR = input.float(0.2,  "Min FVG Size (ATR ×)",    minval = 0.05, step = 0.05, group = GRP_FVG)
+i_fvgWin    = input.int(4,      "FVG Valid Window (bars)", minval = 1, maxval = 10,    group = GRP_FVG)
 
 var string GRP_VOL = "Volume"
-i_volLen     = input.int(20,   "Rel-Vol Lookback",   minval=5,  group=GRP_VOL)
-i_volThresh  = input.float(1.2,"Vol Spike Threshold",minval=1.0,step=0.1, group=GRP_VOL)
+i_volLen    = input.int(20,    "Rel-Vol Lookback",    minval = 5,   group = GRP_VOL)
+i_volThresh = input.float(1.2, "Vol Spike Threshold", minval = 1.0, step = 0.1, group = GRP_VOL)
 
 var string GRP_IND = "Indicators"
-i_emaFast    = input.int(9,  "EMA Fast",   minval=3,  group=GRP_IND)
-i_emaMid     = input.int(20, "EMA Mid",    minval=5,  group=GRP_IND)
-i_emaSlow    = input.int(50, "EMA Slow (display only)", minval=20, group=GRP_IND)
-i_rsiLen     = input.int(9,  "RSI Length", minval=2,  group=GRP_IND)   // default 9 — faster than 14
-i_rsiBullMin = input.int(45, "RSI Min for Longs",  minval=30, maxval=65, group=GRP_IND)
-i_rsiBearMax = input.int(55, "RSI Max for Shorts", minval=35, maxval=70, group=GRP_IND)
-i_atrLen     = input.int(14, "ATR Length", minval=2,  group=GRP_IND)
-i_atrMult    = input.float(0.5,"ATR Stop Buffer ×", minval=0.1, step=0.1, group=GRP_IND)
-i_displLen   = input.int(3,  "Displacement Window (bars)", minval=1, maxval=6, group=GRP_IND)
+i_emaFast    = input.int(9,    "EMA Fast",              minval = 3,  group = GRP_IND)
+i_emaMid     = input.int(20,   "EMA Mid",               minval = 5,  group = GRP_IND)
+i_emaSlow    = input.int(50,   "EMA Slow (display)",    minval = 20, group = GRP_IND)
+i_rsiLen     = input.int(9,    "RSI Length",            minval = 2,  group = GRP_IND)
+i_rsiBullMin = input.int(45,   "RSI Min for Longs",  minval = 30, maxval = 65, group = GRP_IND)
+i_rsiBearMax = input.int(55,   "RSI Max for Shorts", minval = 35, maxval = 70, group = GRP_IND)
+i_atrLen     = input.int(14,   "ATR Length",            minval = 2,  group = GRP_IND)
+i_atrMult    = input.float(0.5,"ATR Stop Buffer ×", minval = 0.1, step = 0.1,  group = GRP_IND)
+i_displLen   = input.int(3,    "Displacement Window (bars)", minval = 1, maxval = 6, group = GRP_IND)
 
 var string GRP_TP = "Take Profit"
-i_tp1R   = input.float(1.0, "TP1 (R)", minval=0.5, step=0.25, group=GRP_TP)
-i_tp2R   = input.float(2.0, "TP2 (R)", minval=1.0, step=0.25, group=GRP_TP)
-i_tp3R   = input.float(3.0, "TP3 (R)", minval=1.5, step=0.25, group=GRP_TP)
-i_runR   = input.float(5.0, "Runner (R)", minval=2.0, step=0.5, group=GRP_TP)
-i_tp1pct = input.float(40.0,"% Exit at TP1", minval=10, maxval=80, step=5, group=GRP_TP)
-i_tp2pct = input.float(30.0,"% Exit at TP2", minval=10, maxval=60, step=5, group=GRP_TP)
-i_tp3pct = input.float(20.0,"% Exit at TP3", minval=5,  maxval=40, step=5, group=GRP_TP)
+i_tp1R   = input.float(1.0, "TP1 (R)", minval = 0.5, step = 0.25, group = GRP_TP)
+i_tp2R   = input.float(2.0, "TP2 (R)", minval = 1.0, step = 0.25, group = GRP_TP)
+i_tp3R   = input.float(3.0, "TP3 (R)", minval = 1.5, step = 0.25, group = GRP_TP)
+i_runR   = input.float(5.0, "Runner (R)", minval = 2.0, step = 0.5, group = GRP_TP)
+i_tp1pct = input.float(40.0, "% Exit at TP1", minval = 10, maxval = 80, step = 5, group = GRP_TP)
+i_tp2pct = input.float(30.0, "% Exit at TP2", minval = 10, maxval = 60, step = 5, group = GRP_TP)
+i_tp3pct = input.float(20.0, "% Exit at TP3", minval = 5,  maxval = 40, step = 5, group = GRP_TP)
 
 var string GRP_VIZ = "Visual"
-i_showEMAs  = input.bool(true,  "Show EMAs",              group=GRP_VIZ)
-i_showVWAP  = input.bool(true,  "Show VWAP",              group=GRP_VIZ)
-i_showFVG   = input.bool(true,  "Show FVG Zones",         group=GRP_VIZ)
-i_showStr   = input.bool(true,  "Show Structure Levels",  group=GRP_VIZ)
-i_showSesHL = input.bool(true,  "Show Session H/L",       group=GRP_VIZ)
-i_showBOS   = input.bool(true,  "Show BOS/CHoCH Labels",  group=GRP_VIZ)
-i_showSLTP  = input.bool(true,  "Show SL/TP Lines",       group=GRP_VIZ)
-i_showDash  = input.bool(true,  "Show Dashboard",         group=GRP_VIZ)
-i_showDebug = input.bool(false, "Show Condition Debug",   group=GRP_VIZ)
+i_showEMAs  = input.bool(true,  "Show EMAs",             group = GRP_VIZ)
+i_showVWAP  = input.bool(true,  "Show VWAP",             group = GRP_VIZ)
+i_showFVG   = input.bool(true,  "Show FVG Zones",        group = GRP_VIZ)
+i_showStr   = input.bool(true,  "Show Structure Levels", group = GRP_VIZ)
+i_showSesHL = input.bool(true,  "Show Session H/L",      group = GRP_VIZ)
+i_showBOS   = input.bool(true,  "Show BOS/CHoCH Labels", group = GRP_VIZ)
+i_showSLTP  = input.bool(true,  "Show SL/TP Lines",      group = GRP_VIZ)
+i_showDash  = input.bool(true,  "Show Dashboard",        group = GRP_VIZ)
+i_showDebug = input.bool(false, "Show Condition Debug",  group = GRP_VIZ)
 
 // ─────────────────────────────────────────────
 // ░░  BASE INDICATORS
 // ─────────────────────────────────────────────
 
-atr   = ta.atr(i_atrLen)
-emaF  = ta.ema(close, i_emaFast)
-emaM  = ta.ema(close, i_emaMid)
-emaS  = ta.ema(close, i_emaSlow)
-rsi   = ta.rsi(close, i_rsiLen)
+atr  = ta.atr(i_atrLen)
+emaF = ta.ema(close, i_emaFast)
+emaM = ta.ema(close, i_emaMid)
+emaS = ta.ema(close, i_emaSlow)
+rsi  = ta.rsi(close, i_rsiLen)
+
 [vwap_val, _, _] = ta.vwap(hlc3, true, 1)
 
-avgVol  = ta.sma(volume, i_volLen)
-relVol  = volume / avgVol
+avgVol   = ta.sma(volume, i_volLen)
+relVol   = volume / avgVol
 volSpike = relVol >= i_volThresh
 
 // ─────────────────────────────────────────────
-// ░░  SESSION  (integer HHMM — reliable across markets)
+// ░░  SESSION  (integer HHMM — reliable across all markets)
 // ─────────────────────────────────────────────
 
 barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
 inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
 
-var float sessionHigh = na, var float sessionLow = na
+var float sessionHigh = na
+var float sessionLow  = na
 var bool  prevSess    = false
+
 sessOpened = inSession and not prevSess
 prevSess  := inSession
 
@@ -112,83 +136,106 @@ else if inSession
 // ─────────────────────────────────────────────
 // ░░  ZERO-LAG ROLLING STRUCTURE
 // ─────────────────────────────────────────────
-// Using [1] offset makes both levels non-repainting:
-// the values are fully determined by bars that have already closed.
-// Signals fire on the SAME bar that price crosses — no pivot delay.
+// [1] offset: values are based only on already-closed bars → non-repainting.
+// Signal fires on the SAME bar as the price cross — zero pivot delay.
 //
-// Two layers:
-//   Near  = short lookback → sweep targets (recent swing H/L)
-//   Far   = long lookback  → macro trend / BOS level
+//  Near = recent swing H/L (sweep targets)
+//  Far  = macro structure (BOS / trend bias)
 
-nearHigh = ta.highest(high, i_nearLen)[1]   // highest of past nearLen bars
-nearLow  = ta.lowest (low,  i_nearLen)[1]   // lowest  of past nearLen bars
+nearHigh = ta.highest(high, i_nearLen)[1]
+nearLow  = ta.lowest (low,  i_nearLen)[1]
 farHigh  = ta.highest(high, i_farLen) [1]
 farLow   = ta.lowest (low,  i_farLen) [1]
 
-// ── BOS / CHoCH  (fires the bar the close crosses the far structure) ──────
+// ── BOS / CHoCH ──────────────────────────────────────────────────────────
 
 var int  trendDir  = 0
-var bool bullBOS   = false, var bool bearBOS   = false
-var bool bullCHoCH = false, var bool bearCHoCH = false
+var bool bullBOS   = false
+var bool bearBOS   = false
+var bool bullCHoCH = false
+var bool bearCHoCH = false
 
-bullBOS   := false ; bearBOS   := false
-bullCHoCH := false ; bearCHoCH := false
+bullBOS   := false
+bearBOS   := false
+bullCHoCH := false
+bearCHoCH := false
 
 bool crossAboveFar = close > farHigh and close[1] <= farHigh
 bool crossBelowFar = close < farLow  and close[1] >= farLow
 
 if crossAboveFar
-    if trendDir >= 0 ; bullBOS   := true
-    else             ; bullCHoCH := true
+    if trendDir >= 0
+        bullBOS := true
+    else
+        bullCHoCH := true
     trendDir := 1
 
 if crossBelowFar
-    if trendDir <= 0 ; bearBOS   := true
-    else             ; bearCHoCH := true
+    if trendDir <= 0
+        bearBOS := true
+    else
+        bearCHoCH := true
     trendDir := -1
 
-// ── LIQUIDITY SWEEP  (near structure, current bar) ────────────────────────
-// Sweep = wick pierces near structure level, close reclaims it.
-// Non-repainting: nearHigh/nearLow use [1] data only.
+// ── LIQUIDITY SWEEP  (near structure) ────────────────────────────────────
+// Wick pierces the near level, candle closes back on origin side.
 
-bullSweep_bar = low  < nearLow  and close > nearLow   // swept below, reclaimed
-bearSweep_bar = high > nearHigh and close < nearHigh  // swept above, rejected
+bullSweep_bar = low  < nearLow  and close > nearLow
+bearSweep_bar = high > nearHigh and close < nearHigh
 
 var float lastBullSweepLow  = na
 var float lastBearSweepHigh = na
-if bullSweep_bar ; lastBullSweepLow  := low
-if bearSweep_bar ; lastBearSweepHigh := high
+
+if bullSweep_bar
+    lastBullSweepLow := low
+if bearSweep_bar
+    lastBearSweepHigh := high
 
 recentBullSweep = ta.barssince(bullSweep_bar) <= i_sweepWin
 recentBearSweep = ta.barssince(bearSweep_bar) <= i_sweepWin
 
 // ─────────────────────────────────────────────
-// ░░  FAIR VALUE GAP  (3-candle imbalance, per-bar)
+// ░░  FAIR VALUE GAP  (3-candle imbalance)
 // ─────────────────────────────────────────────
 
-minFVG = atr * i_fvgMinATR
-bullFVG_bar = low    > high[2] and (low    - high[2]) >= minFVG
-bearFVG_bar = high   < low[2]  and (low[2] - high   ) >= minFVG
+minFVG      = atr * i_fvgMinATR
+bullFVG_bar = low  > high[2] and (low    - high[2]) >= minFVG
+bearFVG_bar = high < low[2]  and (low[2] - high   ) >= minFVG
 
-var float bFVG_top = na, var float bFVG_bot = na, var bool bFVG_on = false
-var float vFVG_top = na, var float vFVG_bot = na, var bool vFVG_on = false
+var float bFVG_top = na
+var float bFVG_bot = na
+var bool  bFVG_on  = false
+var float vFVG_top = na
+var float vFVG_bot = na
+var bool  vFVG_on  = false
 
-if i_fvgOn and bullFVG_bar ; bFVG_top := low    ; bFVG_bot := high[2] ; bFVG_on := true
-if i_fvgOn and bearFVG_bar ; vFVG_top := low[2] ; vFVG_bot := high    ; vFVG_on := true
-if bFVG_on and close < bFVG_bot ; bFVG_on := false
-if vFVG_on and close > vFVG_top ; vFVG_on := false
+if i_fvgOn and bullFVG_bar
+    bFVG_top := low
+    bFVG_bot := high[2]
+    bFVG_on  := true
 
-inBullFVG    = bFVG_on and close >= bFVG_bot and close <= bFVG_top
-inBearFVG    = vFVG_on and close >= vFVG_bot and close <= vFVG_top
+if i_fvgOn and bearFVG_bar
+    vFVG_top := low[2]
+    vFVG_bot := high
+    vFVG_on  := true
+
+if bFVG_on and close < bFVG_bot
+    bFVG_on := false
+if vFVG_on and close > vFVG_top
+    vFVG_on := false
+
+inBullFVG     = bFVG_on and close >= bFVG_bot and close <= bFVG_top
+inBearFVG     = vFVG_on and close >= vFVG_bot and close <= vFVG_top
 recentBullFVG = ta.barssince(bullFVG_bar) <= i_fvgWin
 recentBearFVG = ta.barssince(bearFVG_bar) <= i_fvgWin
 
 // ─────────────────────────────────────────────
-// ░░  DISPLACEMENT CANDLE  (per-bar, zero lag)
+// ░░  DISPLACEMENT CANDLE  (zero lag)
 // ─────────────────────────────────────────────
 
-body   = math.abs(close - open)
+body  = math.abs(close - open)
 range_ = high - low
+
 bullDisp_bar = body > atr * 1.3 and close > open and close >= low  + range_ * 0.70
 bearDisp_bar = body > atr * 1.3 and close < open and close <= high - range_ * 0.70
 
@@ -196,52 +243,47 @@ recentBullDisp = ta.barssince(bullDisp_bar) <= i_displLen
 recentBearDisp = ta.barssince(bearDisp_bar) <= i_displLen
 
 // ─────────────────────────────────────────────
-// ░░  DELTA / CVD  (per-bar, zero lag)
+// ░░  DELTA / CVD  (zero lag)
 // ─────────────────────────────────────────────
 
-buyEst  = volume * math.max(close - low,  0) / math.max(range_, 1e-9)
-sellEst = volume * math.max(high  - close,0) / math.max(range_, 1e-9)
+buyEst  = volume * math.max(close - low,  0.0) / math.max(range_, 1e-9)
+sellEst = volume * math.max(high  - close,0.0) / math.max(range_, 1e-9)
 delta   = buyEst - sellEst
 
 var float cvd = 0.0
 cvd := cvd[1] + delta
 
-deltaPos  = delta > 0                 // this bar: net buying
-deltaNeg  = delta < 0                 // this bar: net selling
-cvdUp     = cvd > cvd[3]             // short CVD trend: 3 bars
-cvdDown   = cvd < cvd[3]
+deltaPos = delta > 0
+deltaNeg = delta < 0
+cvdUp    = cvd > cvd[3]
+cvdDown  = cvd < cvd[3]
 
 // ─────────────────────────────────────────────
-// ░░  TREND / MOMENTUM  FILTERS
+// ░░  TREND / MOMENTUM FILTERS
 // ─────────────────────────────────────────────
 
-emaBull = emaF > emaM                 // primary fast alignment
-emaBear = emaF < emaM
+emaBull  = emaF > emaM
+emaBear  = emaF < emaM
 
 vwapBull = close > vwap_val
 vwapBear = close < vwap_val
 
-// RSI: directional bias + currently moving in the right direction
-rsiBull  = rsi > i_rsiBullMin and rsi > rsi[1]   // above floor & rising this bar
-rsiBear  = rsi < i_rsiBearMax and rsi < rsi[1]   // below ceiling & falling
+rsiBull  = rsi > i_rsiBullMin and rsi > rsi[1]
+rsiBear  = rsi < i_rsiBearMax and rsi < rsi[1]
 
-atrOk = (high - low) > atr * 0.35    // bar has meaningful range (not dead flat)
-volOk = volume > avgVol * 0.75        // at least some volume
+atrOk = (high - low) > atr * 0.35
+volOk = volume > avgVol * 0.75
 
 // ─────────────────────────────────────────────
 // ░░  SIGNAL CONDITIONS
 // ─────────────────────────────────────────────
-//
-// Rolling structure means structure is always known — no phase delay.
-// We still allow a short sweep window (i_sweepWin bars) to let
-// price settle and confirm momentum before entering.
 
 // ── LONG ─────────────────────────────────────
 c_ses_L     = inSession
-c_sweep_L   = recentBullSweep                           // swept near low recently
-c_trend_L   = trendDir >= 0 or emaBull                 // not confirmed bear
-c_ema_L     = emaBull                                   // ema fast > mid
-c_vwap_L    = vwapBull                                  // above VWAP
+c_sweep_L   = recentBullSweep
+c_trend_L   = trendDir >= 0 or emaBull
+c_ema_L     = emaBull
+c_vwap_L    = vwapBull
 c_impulse_L = recentBullDisp or inBullFVG or recentBullFVG
 c_vol_L     = volSpike or relVol > 1.0
 c_rsi_L     = rsiBull
@@ -293,209 +335,267 @@ if sellSignal
 // ░░  TAKE PROFIT
 // ─────────────────────────────────────────────
 
-var float lTP1 = na, var float lTP2 = na, var float lTP3 = na, var float lRun = na
-var float sTP1 = na, var float sTP2 = na, var float sTP3 = na, var float sRun = na
+var float lTP1 = na
+var float lTP2 = na
+var float lTP3 = na
+var float lRun = na
+var float sTP1 = na
+var float sTP2 = na
+var float sTP3 = na
+var float sRun = na
 
 if buySignal and not na(longSL)
-    r   = close - longSL
-    lTP1 := close + r * i_tp1R ; lTP2 := close + r * i_tp2R
-    lTP3 := close + r * i_tp3R ; lRun := close + r * i_runR
+    float r = close - longSL
+    lTP1 := close + r * i_tp1R
+    lTP2 := close + r * i_tp2R
+    lTP3 := close + r * i_tp3R
+    lRun := close + r * i_runR
 
 if sellSignal and not na(shortSL)
-    r   = shortSL - close
-    sTP1 := close - r * i_tp1R ; sTP2 := close - r * i_tp2R
-    sTP3 := close - r * i_tp3R ; sRun := close - r * i_runR
+    float r = shortSL - close
+    sTP1 := close - r * i_tp1R
+    sTP2 := close - r * i_tp2R
+    sTP3 := close - r * i_tp3R
+    sRun := close - r * i_runR
 
 // ─────────────────────────────────────────────
 // ░░  STRATEGY EXECUTION
 // ─────────────────────────────────────────────
 
 if buySignal
-    strategy.entry("Long",  strategy.long,  comment="ISP Buy")
+    strategy.entry("Long",  strategy.long,  comment = "ISP Buy")
+
 if sellSignal
-    strategy.entry("Short", strategy.short, comment="ISP Sell")
+    strategy.entry("Short", strategy.short, comment = "ISP Sell")
 
 if strategy.position_size > 0 and not na(longSL)
-    strategy.exit("L-TP1","Long", qty_percent=i_tp1pct, limit=lTP1, stop=longSL, comment="TP1")
-    strategy.exit("L-TP2","Long", qty_percent=i_tp2pct, limit=lTP2, stop=longSL, comment="TP2")
-    strategy.exit("L-TP3","Long", qty_percent=i_tp3pct, limit=lTP3, stop=longSL, comment="TP3")
-    strategy.exit("L-Run","Long", qty_percent=100,       limit=lRun,  stop=longSL, comment="Runner")
+    strategy.exit("L-TP1", "Long", qty_percent = i_tp1pct, limit = lTP1, stop = longSL,  comment = "TP1")
+    strategy.exit("L-TP2", "Long", qty_percent = i_tp2pct, limit = lTP2, stop = longSL,  comment = "TP2")
+    strategy.exit("L-TP3", "Long", qty_percent = i_tp3pct, limit = lTP3, stop = longSL,  comment = "TP3")
+    strategy.exit("L-Run", "Long", qty_percent = 100,      limit = lRun,  stop = longSL,  comment = "Runner")
 
 if strategy.position_size < 0 and not na(shortSL)
-    strategy.exit("S-TP1","Short",qty_percent=i_tp1pct, limit=sTP1, stop=shortSL, comment="TP1")
-    strategy.exit("S-TP2","Short",qty_percent=i_tp2pct, limit=sTP2, stop=shortSL, comment="TP2")
-    strategy.exit("S-TP3","Short",qty_percent=i_tp3pct, limit=sTP3, stop=shortSL, comment="TP3")
-    strategy.exit("S-Run","Short",qty_percent=100,       limit=sRun,  stop=shortSL, comment="Runner")
+    strategy.exit("S-TP1", "Short", qty_percent = i_tp1pct, limit = sTP1, stop = shortSL, comment = "TP1")
+    strategy.exit("S-TP2", "Short", qty_percent = i_tp2pct, limit = sTP2, stop = shortSL, comment = "TP2")
+    strategy.exit("S-TP3", "Short", qty_percent = i_tp3pct, limit = sTP3, stop = shortSL, comment = "TP3")
+    strategy.exit("S-Run", "Short", qty_percent = 100,      limit = sRun,  stop = shortSL, comment = "Runner")
 
 // ─────────────────────────────────────────────
 // ░░  VISUAL
 // ─────────────────────────────────────────────
 
-// Session background
-bgcolor(i_showSessBG and inSession ? color.new(color.blue, 93) : na, title="Session BG")
+bgcolor(i_showSessBG and inSession ? color.new(color.blue, 93) : na, title = "Session BG")
 
-// EMAs
-plot(i_showEMAs ? emaF : na, "EMA Fast", color=color.new(color.yellow, 0), linewidth=1)
-plot(i_showEMAs ? emaM : na, "EMA Mid",  color=color.new(color.orange, 0), linewidth=1)
-plot(i_showEMAs ? emaS : na, "EMA Slow", color=color.new(color.red,    0), linewidth=2)
+plot(i_showEMAs ? emaF : na, "EMA Fast", color = color.new(color.yellow, 0), linewidth = 1)
+plot(i_showEMAs ? emaM : na, "EMA Mid",  color = color.new(color.orange, 0), linewidth = 1)
+plot(i_showEMAs ? emaS : na, "EMA Slow", color = color.new(color.red,    0), linewidth = 2)
 
-// VWAP
-plot(i_showVWAP ? vwap_val : na, "VWAP", color=color.new(color.purple, 0), linewidth=2)
+plot(i_showVWAP ? vwap_val : na, "VWAP",
+     color = color.new(color.purple, 0), linewidth = 2)
 
-// Session High / Low
-plot(i_showSesHL and inSession ? sessionHigh : na, "Sess H", color=color.new(color.teal,   0), style=plot.style_stepline, linewidth=1)
-plot(i_showSesHL and inSession ? sessionLow  : na, "Sess L", color=color.new(color.maroon, 0), style=plot.style_stepline, linewidth=1)
+plot(i_showSesHL and inSession ? sessionHigh : na, "Sess H",
+     color = color.new(color.teal,   0), style = plot.style_stepline, linewidth = 1)
+plot(i_showSesHL and inSession ? sessionLow  : na, "Sess L",
+     color = color.new(color.maroon, 0), style = plot.style_stepline, linewidth = 1)
 
-// Rolling structure levels
-plot(i_showStr ? nearHigh : na, "Near High", color=color.new(color.silver, 50), style=plot.style_stepline, linewidth=1)
-plot(i_showStr ? nearLow  : na, "Near Low",  color=color.new(color.silver, 50), style=plot.style_stepline, linewidth=1)
+plot(i_showStr ? nearHigh : na, "Near High",
+     color = color.new(color.silver, 50), style = plot.style_stepline, linewidth = 1)
+plot(i_showStr ? nearLow  : na, "Near Low",
+     color = color.new(color.silver, 50), style = plot.style_stepline, linewidth = 1)
 
-// BOS / CHoCH
-plotshape(i_showBOS and bullBOS,   location=location.belowbar, style=shape.labelup,   color=color.new(color.lime,    0), text="BOS",   textcolor=color.black, size=size.tiny)
-plotshape(i_showBOS and bearBOS,   location=location.abovebar, style=shape.labeldown, color=color.new(color.red,     0), text="BOS",   textcolor=color.white, size=size.tiny)
-plotshape(i_showBOS and bullCHoCH, location=location.belowbar, style=shape.labelup,   color=color.new(color.aqua,    0), text="CHoCH", textcolor=color.black, size=size.tiny)
-plotshape(i_showBOS and bearCHoCH, location=location.abovebar, style=shape.labeldown, color=color.new(color.fuchsia, 0), text="CHoCH", textcolor=color.white, size=size.tiny)
+plotshape(i_showBOS and bullBOS,   location = location.belowbar, style = shape.labelup,
+     color = color.new(color.lime,    0), text = "BOS",   textcolor = color.black, size = size.tiny)
+plotshape(i_showBOS and bearBOS,   location = location.abovebar, style = shape.labeldown,
+     color = color.new(color.red,     0), text = "BOS",   textcolor = color.white, size = size.tiny)
+plotshape(i_showBOS and bullCHoCH, location = location.belowbar, style = shape.labelup,
+     color = color.new(color.aqua,    0), text = "CHoCH", textcolor = color.black, size = size.tiny)
+plotshape(i_showBOS and bearCHoCH, location = location.abovebar, style = shape.labeldown,
+     color = color.new(color.fuchsia, 0), text = "CHoCH", textcolor = color.white, size = size.tiny)
 
-// Sweep dots
-plotshape(bullSweep_bar, location=location.belowbar, style=shape.circle, color=color.new(color.lime, 30), size=size.tiny, title="Bull Sweep")
-plotshape(bearSweep_bar, location=location.abovebar, style=shape.circle, color=color.new(color.red,  30), size=size.tiny, title="Bear Sweep")
+plotshape(bullSweep_bar, location = location.belowbar, style = shape.circle,
+     color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
+plotshape(bearSweep_bar, location = location.abovebar, style = shape.circle,
+     color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
 
-// FVG zones
 if i_showFVG and i_fvgOn
     if bullFVG_bar
-        line.new(bar_index, low,     bar_index + 20, low,     color=color.new(color.green, 50), style=line.style_dashed, width=1)
-        line.new(bar_index, high[2], bar_index + 20, high[2], color=color.new(color.green, 50), style=line.style_dashed, width=1)
+        line.new(bar_index, low,     bar_index + 20, low,
+             color = color.new(color.green, 50), style = line.style_dashed, width = 1)
+        line.new(bar_index, high[2], bar_index + 20, high[2],
+             color = color.new(color.green, 50), style = line.style_dashed, width = 1)
     if bearFVG_bar
-        line.new(bar_index, low[2],  bar_index + 20, low[2],  color=color.new(color.red,   50), style=line.style_dashed, width=1)
-        line.new(bar_index, high,    bar_index + 20, high,    color=color.new(color.red,   50), style=line.style_dashed, width=1)
+        line.new(bar_index, low[2],  bar_index + 20, low[2],
+             color = color.new(color.red, 50), style = line.style_dashed, width = 1)
+        line.new(bar_index, high,    bar_index + 20, high,
+             color = color.new(color.red, 50), style = line.style_dashed, width = 1)
 
-// Entry arrows
-plotshape(buySignal,  location=location.belowbar, style=shape.triangleup,   color=color.new(color.lime, 0), size=size.normal, title="Buy")
-plotshape(sellSignal, location=location.abovebar, style=shape.triangledown, color=color.new(color.red,  0), size=size.normal, title="Sell")
+plotshape(buySignal,  location = location.belowbar, style = shape.triangleup,
+     color = color.new(color.lime, 0), size = size.normal, title = "Buy")
+plotshape(sellSignal, location = location.abovebar, style = shape.triangledown,
+     color = color.new(color.red,  0), size = size.normal, title = "Sell")
 
 // ── SL / TP lines + labels ────────────────────────────────────────────────
-drawLevel(int x0, float price, int ext, color lc, color bc, color tc, string txt) =>
-    line.new(x0, price, ext, price, color=lc, style=line.style_dashed, width=1)
-    label.new(ext, price, txt, color=bc, textcolor=tc,
-         style=label.style_label_left, size=size.small, xloc=xloc.bar_index)
 
 if i_showSLTP
     int ext = bar_index + 35
-    p(float v) => str.tostring(math.round(v, 2))
 
     if buySignal and not na(longSL)
-        riskL = close - longSL
+        float riskL = close - longSL
+
         label.new(bar_index, low - atr * 0.7,
-             "▲ LONG  @ " + p(close) + "\nRisk  " + p(riskL) + " pts",
-             color=color.new(color.lime,10), textcolor=color.black,
-             style=label.style_label_up, size=size.small, xloc=xloc.bar_index)
-        drawLevel(bar_index, longSL, ext, color.new(color.red,  0), color.new(color.red,  10), color.white, "SL  "  + p(longSL))
-        drawLevel(bar_index, lTP1,   ext, color.new(color.lime, 0), color.new(color.lime, 10), color.black, "TP1  " + p(lTP1)   + "  (" + str.tostring(i_tp1R) + "R)")
-        drawLevel(bar_index, lTP2,   ext, color.new(color.green,0), color.new(color.green,10), color.white, "TP2  " + p(lTP2)   + "  (" + str.tostring(i_tp2R) + "R)")
-        drawLevel(bar_index, lTP3,   ext, color.new(color.teal, 0), color.new(color.teal, 10), color.white, "TP3  " + p(lTP3)   + "  (" + str.tostring(i_tp3R) + "R)")
-        drawLevel(bar_index, lRun,   ext, color.new(color.aqua, 0), color.new(color.aqua, 10), color.black, "RUN  " + p(lRun)   + "  (" + str.tostring(i_runR)  + "R)")
+             "▲ LONG  @ " + fmtP(close) + "\nRisk  " + fmtP(riskL) + " pts",
+             color     = color.new(color.lime, 10),
+             textcolor = color.black,
+             style     = label.style_label_up,
+             size      = size.small,
+             xloc      = xloc.bar_index)
+
+        drawLevel(bar_index, longSL, ext,
+             color.new(color.red,   0), color.new(color.red,   10), color.white,
+             "SL  " + fmtP(longSL))
+        drawLevel(bar_index, lTP1, ext,
+             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
+             "TP1  " + fmtP(lTP1) + "  (" + str.tostring(i_tp1R) + "R)")
+        drawLevel(bar_index, lTP2, ext,
+             color.new(color.green, 0), color.new(color.green, 10), color.white,
+             "TP2  " + fmtP(lTP2) + "  (" + str.tostring(i_tp2R) + "R)")
+        drawLevel(bar_index, lTP3, ext,
+             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
+             "TP3  " + fmtP(lTP3) + "  (" + str.tostring(i_tp3R) + "R)")
+        drawLevel(bar_index, lRun, ext,
+             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
+             "RUN  " + fmtP(lRun)  + "  (" + str.tostring(i_runR)  + "R)")
 
     if sellSignal and not na(shortSL)
-        riskS = shortSL - close
+        float riskS = shortSL - close
+
         label.new(bar_index, high + atr * 0.7,
-             "▼ SHORT  @ " + p(close) + "\nRisk  " + p(riskS) + " pts",
-             color=color.new(color.red, 10), textcolor=color.white,
-             style=label.style_label_down, size=size.small, xloc=xloc.bar_index)
-        drawLevel(bar_index, shortSL, ext, color.new(color.red,  0), color.new(color.red,  10), color.white, "SL  "  + p(shortSL))
-        drawLevel(bar_index, sTP1,    ext, color.new(color.lime, 0), color.new(color.lime, 10), color.black, "TP1  " + p(sTP1)   + "  (" + str.tostring(i_tp1R) + "R)")
-        drawLevel(bar_index, sTP2,    ext, color.new(color.green,0), color.new(color.green,10), color.white, "TP2  " + p(sTP2)   + "  (" + str.tostring(i_tp2R) + "R)")
-        drawLevel(bar_index, sTP3,    ext, color.new(color.teal, 0), color.new(color.teal, 10), color.white, "TP3  " + p(sTP3)   + "  (" + str.tostring(i_tp3R) + "R)")
-        drawLevel(bar_index, sRun,    ext, color.new(color.aqua, 0), color.new(color.aqua, 10), color.black, "RUN  " + p(sRun)   + "  (" + str.tostring(i_runR)  + "R)")
+             "▼ SHORT  @ " + fmtP(close) + "\nRisk  " + fmtP(riskS) + " pts",
+             color     = color.new(color.red, 10),
+             textcolor = color.white,
+             style     = label.style_label_down,
+             size      = size.small,
+             xloc      = xloc.bar_index)
+
+        drawLevel(bar_index, shortSL, ext,
+             color.new(color.red,   0), color.new(color.red,   10), color.white,
+             "SL  " + fmtP(shortSL))
+        drawLevel(bar_index, sTP1, ext,
+             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
+             "TP1  " + fmtP(sTP1) + "  (" + str.tostring(i_tp1R) + "R)")
+        drawLevel(bar_index, sTP2, ext,
+             color.new(color.green, 0), color.new(color.green, 10), color.white,
+             "TP2  " + fmtP(sTP2) + "  (" + str.tostring(i_tp2R) + "R)")
+        drawLevel(bar_index, sTP3, ext,
+             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
+             "TP3  " + fmtP(sTP3) + "  (" + str.tostring(i_tp3R) + "R)")
+        drawLevel(bar_index, sRun, ext,
+             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
+             "RUN  " + fmtP(sRun)  + "  (" + str.tostring(i_runR)  + "R)")
 
 // ─────────────────────────────────────────────
 // ░░  DASHBOARD
 // ─────────────────────────────────────────────
 
 if i_showDash
-    string td  = trendDir == 1 ? "▲ BULL" : trendDir == -1 ? "▼ BEAR" : "── NEUT"
-    string sv  = inSession ? "✔ ACTIVE" : "✖ OFF"
-    string vl  = volSpike  ? "SPIKE" : relVol > 1.0 ? "NORM" : "LOW"
-    string vw  = vwapBull  ? "ABOVE" : "BELOW"
-    string em  = emaBull   ? "▲ BULL" : "▼ BEAR"
-    string sw  = recentBullSweep ? "BULL" : recentBearSweep ? "BEAR" : "─"
-    string po  = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
-    string wr  = (strategy.wintrades + strategy.losstrades) > 0
-         ? str.tostring(math.round(strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100, 1)) + "%"
+    string td = trendDir == 1 ? "▲ BULL" : trendDir == -1 ? "▼ BEAR" : "── NEUT"
+    string sv = inSession  ? "✔ ACTIVE" : "✖ OFF"
+    string vl = volSpike   ? "SPIKE"    : relVol > 1.0 ? "NORM" : "LOW"
+    string vw = vwapBull   ? "ABOVE"    : "BELOW"
+    string em = emaBull    ? "▲ BULL"   : "▼ BEAR"
+    string sw = recentBullSweep ? "BULL" : recentBearSweep ? "BEAR" : "─"
+    string po = strategy.position_size > 0  ? "LONG"  :
+                strategy.position_size < 0  ? "SHORT" : "FLAT"
+
+    int   tot = strategy.wintrades + strategy.losstrades
+    string wr = tot > 0
+         ? str.tostring(math.round(strategy.wintrades / tot * 100, 1)) + "%"
          : "N/A"
-    string pf  = strategy.grossloss != 0
+    string pf = strategy.grossloss != 0
          ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
          : "N/A"
 
-    txt = "═══ ISP v1.3 ═══\n"
-        + "Session : " + sv  + "\n"
-        + "Trend   : " + td  + "\n"
-        + "EMA     : " + em  + "\n"
-        + "VWAP    : " + vw  + "\n"
-        + "Volume  : " + vl  + " (" + str.tostring(math.round(relVol, 2)) + "x)\n"
-        + "RSI     : " + str.tostring(math.round(rsi, 1)) + "\n"
-        + "Sweep   : " + sw  + "\n"
-        + "────────────────\n"
-        + "Position: " + po  + "\n"
-        + "Win Rate: " + wr  + "\n"
-        + "Prof Fac: " + pf  + "\n"
-        + "Net P&L : $" + str.tostring(math.round(strategy.netprofit, 2))
+    string dashText =
+         "═══ ISP v1.3 ═══\n" +
+         "Session : " + sv  + "\n" +
+         "Trend   : " + td  + "\n" +
+         "EMA     : " + em  + "\n" +
+         "VWAP    : " + vw  + "\n" +
+         "Volume  : " + vl  + " (" + str.tostring(math.round(relVol, 2)) + "x)\n" +
+         "RSI     : " + str.tostring(math.round(rsi, 1)) + "\n" +
+         "Sweep   : " + sw  + "\n" +
+         "────────────────\n" +
+         "Position: " + po  + "\n" +
+         "Win Rate: " + wr  + "\n" +
+         "Prof Fac: " + pf  + "\n" +
+         "Net P&L : $" + str.tostring(math.round(strategy.netprofit, 2))
 
     var table dash = table.new(position.top_right, 1, 1,
-         bgcolor=color.new(color.black, 10),
-         border_color=color.new(color.gray, 30), border_width=1,
-         frame_color=color.new(color.gray, 20), frame_width=1)
-    table.cell(dash, 0, 0, txt, text_color=color.white, text_size=size.small,
-         bgcolor=color.new(color.black, 15))
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray,  30),
+         border_width = 1,
+         frame_color  = color.new(color.gray,  20),
+         frame_width  = 1)
+    table.cell(dash, 0, 0, dashText,
+         text_color = color.white,
+         text_size  = size.small,
+         bgcolor    = color.new(color.black, 15))
 
 // ─────────────────────────────────────────────
-// ░░  CONDITION DEBUG
+// ░░  CONDITION DEBUG TABLE
 // ─────────────────────────────────────────────
 
 if i_showDebug
-    ok(bool b) => b ? "✔" : "✗"
-    dbg = "── LONG ──\n"
-        + ok(c_ses_L)     + " Session\n"
-        + ok(c_sweep_L)   + " Sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + "b ago)\n"
-        + ok(c_trend_L)   + " Trend (dir=" + str.tostring(trendDir) + ")\n"
-        + ok(c_ema_L)     + " EMA align\n"
-        + ok(c_vwap_L)    + " VWAP\n"
-        + ok(c_impulse_L) + " Disp/FVG\n"
-        + ok(c_vol_L)     + " Vol (" + str.tostring(math.round(relVol,2)) + "x)\n"
-        + ok(c_rsi_L)     + " RSI (" + str.tostring(math.round(rsi,1)) + ")\n"
-        + ok(c_delta_L)   + " Delta\n"
-        + ok(c_noise_L)   + " Range/Vol OK\n"
-        + "── SHORT ──\n"
-        + ok(c_ses_S)     + " Session\n"
-        + ok(c_sweep_S)   + " Sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + "b ago)\n"
-        + ok(c_trend_S)   + " Trend\n"
-        + ok(c_ema_S)     + " EMA align\n"
-        + ok(c_vwap_S)    + " VWAP\n"
-        + ok(c_impulse_S) + " Disp/FVG\n"
-        + ok(c_vol_S)     + " Vol\n"
-        + ok(c_rsi_S)     + " RSI\n"
-        + ok(c_delta_S)   + " Delta\n"
-        + ok(c_noise_S)   + " Range/Vol OK"
+    string dbg =
+         "── LONG ──\n" +
+         fmtOk(c_ses_L)     + " Session\n" +
+         fmtOk(c_sweep_L)   + " Sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + "b ago)\n" +
+         fmtOk(c_trend_L)   + " Trend (dir=" + str.tostring(trendDir) + ")\n" +
+         fmtOk(c_ema_L)     + " EMA align\n" +
+         fmtOk(c_vwap_L)    + " VWAP\n" +
+         fmtOk(c_impulse_L) + " Disp/FVG\n" +
+         fmtOk(c_vol_L)     + " Vol (" + str.tostring(math.round(relVol, 2)) + "x)\n" +
+         fmtOk(c_rsi_L)     + " RSI (" + str.tostring(math.round(rsi, 1)) + ")\n" +
+         fmtOk(c_delta_L)   + " Delta\n" +
+         fmtOk(c_noise_L)   + " Range/Vol OK\n" +
+         "── SHORT ──\n" +
+         fmtOk(c_ses_S)     + " Session\n" +
+         fmtOk(c_sweep_S)   + " Sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + "b ago)\n" +
+         fmtOk(c_trend_S)   + " Trend\n" +
+         fmtOk(c_ema_S)     + " EMA align\n" +
+         fmtOk(c_vwap_S)    + " VWAP\n" +
+         fmtOk(c_impulse_S) + " Disp/FVG\n" +
+         fmtOk(c_vol_S)     + " Vol\n" +
+         fmtOk(c_rsi_S)     + " RSI\n" +
+         fmtOk(c_delta_S)   + " Delta\n" +
+         fmtOk(c_noise_S)   + " Range/Vol OK"
 
     var table tbl = table.new(position.bottom_left, 1, 1,
-         bgcolor=color.new(color.black, 10),
-         border_color=color.new(color.gray, 30), border_width=1)
-    table.cell(tbl, 0, 0, dbg, text_color=color.white, text_size=size.tiny,
-         bgcolor=color.new(color.black, 15))
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray, 30),
+         border_width = 1)
+    table.cell(tbl, 0, 0, dbg,
+         text_color = color.white,
+         text_size  = size.tiny,
+         bgcolor    = color.new(color.black, 15))
 
 // ─────────────────────────────────────────────
 // ░░  ALERTS
 // ─────────────────────────────────────────────
 
-alertcondition(buySignal,      title="ISP — Buy",         message="ISP Buy | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(sellSignal,     title="ISP — Sell",        message="ISP Sell | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(bullSweep_bar,  title="ISP — Bull Sweep",  message="Bull sweep | {{ticker}} @ {{close}}")
-alertcondition(bearSweep_bar,  title="ISP — Bear Sweep",  message="Bear sweep | {{ticker}} @ {{close}}")
-alertcondition(bullBOS,        title="ISP — Bull BOS",    message="Bull BOS | {{ticker}} @ {{close}}")
-alertcondition(bearBOS,        title="ISP — Bear BOS",    message="Bear BOS | {{ticker}} @ {{close}}")
-alertcondition(bullCHoCH,      title="ISP — Bull CHoCH",  message="Bull CHoCH | {{ticker}} @ {{close}}")
-alertcondition(bearCHoCH,      title="ISP — Bear CHoCH",  message="Bear CHoCH | {{ticker}} @ {{close}}")
-alertcondition(trendDir ==  1 and trendDir[1] != 1,  title="ISP — Trend → Bull", message="Trend → BULL | {{ticker}}")
-alertcondition(trendDir == -1 and trendDir[1] != -1, title="ISP — Trend → Bear", message="Trend → BEAR | {{ticker}}")
+alertcondition(buySignal,      title = "ISP — Buy",        message = "ISP Buy | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(sellSignal,     title = "ISP — Sell",       message = "ISP Sell | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bullSweep_bar,  title = "ISP — Bull Sweep", message = "Bull sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweep_bar,  title = "ISP — Bear Sweep", message = "Bear sweep | {{ticker}} @ {{close}}")
+alertcondition(bullBOS,        title = "ISP — Bull BOS",   message = "Bull BOS | {{ticker}} @ {{close}}")
+alertcondition(bearBOS,        title = "ISP — Bear BOS",   message = "Bear BOS | {{ticker}} @ {{close}}")
+alertcondition(bullCHoCH,      title = "ISP — Bull CHoCH", message = "Bull CHoCH | {{ticker}} @ {{close}}")
+alertcondition(bearCHoCH,      title = "ISP — Bear CHoCH", message = "Bear CHoCH | {{ticker}} @ {{close}}")
+
+alertcondition(trendDir ==  1 and trendDir[1] !=  1,
+     title = "ISP — Trend → Bull", message = "Trend → BULL | {{ticker}}")
+alertcondition(trendDir == -1 and trendDir[1] != -1,
+     title = "ISP — Trend → Bear", message = "Trend → BEAR | {{ticker}}")
 
 // ─────────────────────────────────────────────
 // ░░  END
