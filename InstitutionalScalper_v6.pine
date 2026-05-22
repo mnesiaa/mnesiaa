@@ -1,5 +1,5 @@
 // ============================================================
-// INSTITUTIONAL SCALPER PRO v1.0
+// INSTITUTIONAL SCALPER PRO v1.1
 // Pine Script v6 — Strategy + Indicator Combined
 // Author: Institutional Scalper Pro
 // Optimized for: NQ, ES, SPY, QQQ, BTC, XAUUSD
@@ -12,18 +12,18 @@
 //   4. Volume Analysis (relative volume, absorption, CVD proxy)
 //   5. Trend & Momentum Filters (VWAP, EMA 9/20/50, ATR, RSI)
 //   6. Session Filter (NY AM 09:30–11:30 EST)
-//   7. Signal Logic (BUY/SELL with multi-confirmation gate)
+//   7. Signal Logic — sweep TRIGGERS, confirmation ENTRY (2-phase)
 //   8. Stop Loss (structure-based + ATR buffer)
 //   9. Take Profit (TP1/TP2/TP3/Runner, R-multiples)
 //  10. Backtest Engine (strategy.entry / strategy.exit)
-//  11. Visual Dashboard
+//  11. Visual Dashboard + Condition Debug
 //  12. Alert Conditions
 // ============================================================
 
 //@version=6
 strategy(
-     title            = "Institutional Scalper Pro v1.0",
-     shorttitle       = "ISP v1.0",
+     title            = "Institutional Scalper Pro v1.1",
+     shorttitle       = "ISP v1.1",
      overlay          = true,
      pyramiding       = 0,
      default_qty_type = strategy.percent_of_equity,
@@ -40,117 +40,101 @@ strategy(
 // ░░  INPUTS
 // ─────────────────────────────────────────────
 
-// --- Session ---
 var string GRP_SESSION = "Session Filter"
 i_useSession   = input.bool(true,  "Enable NY AM Session Filter", group=GRP_SESSION)
-i_sessionStart = input.session("0930-1130", "NY AM Session (EST)", group=GRP_SESSION)
-i_showSession  = input.bool(true,  "Shade Session Background",     group=GRP_SESSION)
+i_showSession  = input.bool(true,  "Shade Session Background",    group=GRP_SESSION)
+i_sesStart     = input.int(930,    "Session Start (HHMM)",        group=GRP_SESSION)
+i_sesEnd       = input.int(1130,   "Session End   (HHMM)",        group=GRP_SESSION)
 
-// --- Market Structure ---
 var string GRP_MS = "Market Structure"
-i_swingLen  = input.int(10,  "Swing Lookback Length",    minval=3, maxval=50, group=GRP_MS)
-i_bosLen    = input.int(20,  "BOS Confirmation Length",  minval=5, maxval=100, group=GRP_MS)
+i_swingLen     = input.int(10, "Swing Lookback (bars)", minval=3, maxval=50, group=GRP_MS)
+i_sweepWindow  = input.int(5,  "Sweep Confirmation Window (bars)", minval=1, maxval=15, group=GRP_MS)
 
-// --- Fair Value Gap ---
 var string GRP_FVG = "Fair Value Gap"
-i_fvgEnable = input.bool(true, "Enable FVG Detection",   group=GRP_FVG)
-i_fvgMinATR = input.float(0.3, "Min FVG Size (ATR mult)",minval=0.1,step=0.1, group=GRP_FVG)
+i_fvgEnable    = input.bool(true,  "Enable FVG Detection",        group=GRP_FVG)
+i_fvgMinATR    = input.float(0.25, "Min FVG Size (ATR mult)",     minval=0.05, step=0.05, group=GRP_FVG)
+i_fvgWindow    = input.int(5,      "FVG Entry Window (bars)",     minval=1, maxval=20,  group=GRP_FVG)
 
-// --- Volume ---
 var string GRP_VOL = "Volume"
-i_volLen    = input.int(20,  "Relative Volume Length",   minval=5, group=GRP_VOL)
-i_volThresh = input.float(1.5,"Volume Spike Threshold",  minval=1.0,step=0.1, group=GRP_VOL)
+i_volLen       = input.int(20,   "Relative Volume Length",        minval=5,  group=GRP_VOL)
+i_volThresh    = input.float(1.3,"Volume Spike Threshold",        minval=1.0,step=0.1, group=GRP_VOL)
 
-// --- Trend Filters ---
 var string GRP_TREND = "Trend & Momentum Filters"
-i_ema9   = input.int(9,   "EMA Fast",   minval=3,  group=GRP_TREND)
-i_ema20  = input.int(20,  "EMA Mid",    minval=5,  group=GRP_TREND)
-i_ema50  = input.int(50,  "EMA Slow",   minval=20, group=GRP_TREND)
-i_rsiLen = input.int(14,  "RSI Length", minval=2,  group=GRP_TREND)
-i_rsiBull= input.int(55,  "RSI Bull Threshold (>)", minval=50, maxval=80, group=GRP_TREND)
-i_rsiBear= input.int(45,  "RSI Bear Threshold (<)", minval=20, maxval=50, group=GRP_TREND)
-i_atrLen = input.int(14,  "ATR Length", minval=2,  group=GRP_TREND)
-i_atrMult= input.float(0.5,"ATR Stop Buffer Mult", minval=0.1,step=0.1, group=GRP_TREND)
+i_ema9         = input.int(9,   "EMA Fast",   minval=3,  group=GRP_TREND)
+i_ema20        = input.int(20,  "EMA Mid",    minval=5,  group=GRP_TREND)
+i_ema50        = input.int(50,  "EMA Slow",   minval=20, group=GRP_TREND)
+i_rsiLen       = input.int(14,  "RSI Length", minval=2,  group=GRP_TREND)
+i_rsiBullMin   = input.int(45,  "RSI Min for Longs  (>)",  minval=30, maxval=65, group=GRP_TREND)
+i_rsiBearMax   = input.int(55,  "RSI Max for Shorts (<)",  minval=35, maxval=70, group=GRP_TREND)
+i_atrLen       = input.int(14,  "ATR Length",              minval=2,  group=GRP_TREND)
+i_atrMult      = input.float(0.5,"ATR Stop Buffer Mult",   minval=0.1,step=0.1, group=GRP_TREND)
+i_displLen     = input.int(5,   "Displacement Lookback (bars)", minval=1, maxval=10, group=GRP_TREND)
 
-// --- Take Profit ---
 var string GRP_TP = "Take Profit (R-Multiples)"
-i_tp1R   = input.float(1.0, "TP1 (R)",    minval=0.5, step=0.25, group=GRP_TP)
-i_tp2R   = input.float(2.0, "TP2 (R)",    minval=1.0, step=0.25, group=GRP_TP)
-i_tp3R   = input.float(3.0, "TP3 (R)",    minval=1.5, step=0.25, group=GRP_TP)
-i_runR   = input.float(5.0, "Runner (R)", minval=2.0, step=0.5,  group=GRP_TP)
-i_tp1pct = input.float(40.0,"% Closed at TP1", minval=10, maxval=80, step=5, group=GRP_TP)
-i_tp2pct = input.float(30.0,"% Closed at TP2", minval=10, maxval=60, step=5, group=GRP_TP)
-i_tp3pct = input.float(20.0,"% Closed at TP3", minval=5,  maxval=40, step=5, group=GRP_TP)
+i_tp1R         = input.float(1.0, "TP1 (R)",    minval=0.5, step=0.25, group=GRP_TP)
+i_tp2R         = input.float(2.0, "TP2 (R)",    minval=1.0, step=0.25, group=GRP_TP)
+i_tp3R         = input.float(3.0, "TP3 (R)",    minval=1.5, step=0.25, group=GRP_TP)
+i_runR         = input.float(5.0, "Runner (R)", minval=2.0, step=0.5,  group=GRP_TP)
+i_tp1pct       = input.float(40.0,"% Closed at TP1", minval=10, maxval=80, step=5, group=GRP_TP)
+i_tp2pct       = input.float(30.0,"% Closed at TP2", minval=10, maxval=60, step=5, group=GRP_TP)
+i_tp3pct       = input.float(20.0,"% Closed at TP3", minval=5,  maxval=40, step=5, group=GRP_TP)
 
-// --- Display ---
 var string GRP_VIZ = "Visual Settings"
-i_showEMAs    = input.bool(true,  "Show EMAs",              group=GRP_VIZ)
-i_showVWAP    = input.bool(true,  "Show VWAP",              group=GRP_VIZ)
-i_showFVG     = input.bool(true,  "Show Fair Value Gaps",   group=GRP_VIZ)
-i_showSesHL   = input.bool(true,  "Show Session High/Low",  group=GRP_VIZ)
-i_showBOSLine = input.bool(true,  "Show BOS/CHoCH Lines",   group=GRP_VIZ)
-i_showDash    = input.bool(true,  "Show Dashboard",         group=GRP_VIZ)
-i_showSLTP    = input.bool(true,  "Show SL/TP Lines",       group=GRP_VIZ)
+i_showEMAs     = input.bool(true,  "Show EMAs",             group=GRP_VIZ)
+i_showVWAP     = input.bool(true,  "Show VWAP",             group=GRP_VIZ)
+i_showFVG      = input.bool(true,  "Show Fair Value Gaps",  group=GRP_VIZ)
+i_showSesHL    = input.bool(true,  "Show Session High/Low", group=GRP_VIZ)
+i_showBOS      = input.bool(true,  "Show BOS/CHoCH Labels", group=GRP_VIZ)
+i_showDash     = input.bool(true,  "Show Dashboard",        group=GRP_VIZ)
+i_showDebug    = input.bool(false, "Show Condition Debug",  group=GRP_VIZ)
+i_showSLTP     = input.bool(true,  "Show SL/TP Lines",      group=GRP_VIZ)
 
 // ─────────────────────────────────────────────
-// ░░  CORE CALCULATIONS
+// ░░  CORE INDICATORS
 // ─────────────────────────────────────────────
 
-// ATR
-atr = ta.atr(i_atrLen)
-
-// EMAs
-ema9  = ta.ema(close, i_ema9)
-ema20 = ta.ema(close, i_ema20)
-ema50 = ta.ema(close, i_ema50)
-
-// RSI
-rsi = ta.rsi(close, i_rsiLen)
-
-// VWAP (session-anchored)
+atr    = ta.atr(i_atrLen)
+ema9   = ta.ema(close, i_ema9)
+ema20  = ta.ema(close, i_ema20)
+ema50  = ta.ema(close, i_ema50)
+rsi    = ta.rsi(close, i_rsiLen)
 [vwap_val, _, _] = ta.vwap(hlc3, true, 1)
 
-// Relative Volume
-avgVol   = ta.sma(volume, i_volLen)
-relVol   = volume / avgVol
+avgVol  = ta.sma(volume, i_volLen)
+relVol  = volume / avgVol
 volSpike = relVol >= i_volThresh
 
 // ─────────────────────────────────────────────
 // ░░  SESSION LOGIC
 // ─────────────────────────────────────────────
+// Integer HHMM comparison is cleaner and avoids input.session quirks.
 
-inSession = not i_useSession or na(time(timeframe.period, i_sessionStart, "America/New_York")) == false
+barHHMM = (hour(time, "America/New_York") * 100) + minute(time, "America/New_York")
+rawInSession = barHHMM >= i_sesStart and barHHMM < i_sesEnd
+inSession = not i_useSession or rawInSession
 
-// Track session open bar
-var bool  sessionJustOpened = false
-var float sessionHigh       = na
-var float sessionLow        = na
-var int   sessionStartBar   = na
+var bool  prevInSession = false
+var float sessionHigh   = na
+var float sessionLow    = na
+sessionOpened = inSession and not prevInSession
+prevInSession := inSession
 
-bool prevInSession = inSession[1]
-sessionJustOpened := inSession and not prevInSession
-
-if sessionJustOpened
-    sessionHigh      := high
-    sessionLow       := low
-    sessionStartBar  := bar_index
+if sessionOpened
+    sessionHigh := high
+    sessionLow  := low
 else if inSession
     sessionHigh := math.max(sessionHigh, high)
     sessionLow  := math.min(sessionLow,  low)
 
 // ─────────────────────────────────────────────
-// ░░  SWING HIGH / LOW (confirmed, non-repainting)
+// ░░  SWING HIGH / LOW  (confirmed, non-repainting)
 // ─────────────────────────────────────────────
-// We look BACK i_swingLen bars so signal is confirmed after close.
 
 swingHigh = ta.pivothigh(high, i_swingLen, i_swingLen)
 swingLow  = ta.pivotlow (low,  i_swingLen, i_swingLen)
 
-// Track last N confirmed swing points
-var float lastSwingHigh   = na
-var float lastSwingHigh2  = na  // second-to-last
-var float lastSwingLow    = na
-var float lastSwingLow2   = na
+var float lastSwingHigh  = na, var float lastSwingHigh2 = na
+var float lastSwingLow   = na, var float lastSwingLow2  = na
 
 if not na(swingHigh)
     lastSwingHigh2 := lastSwingHigh
@@ -163,210 +147,207 @@ if not na(swingLow)
 // ─────────────────────────────────────────────
 // ░░  MARKET STRUCTURE — BOS / CHoCH
 // ─────────────────────────────────────────────
-// BOS  = price closes beyond the LAST swing point in same trend direction
-// CHoCH = price closes beyond swing point AGAINST prior trend → reversal
 
-var int   trendDir       = 0   // 1 = bull, -1 = bear, 0 = unknown
-var float bosLevel       = na
-var bool  bullishBOS     = false
-var bool  bearishBOS     = false
-var bool  bullishCHoCH   = false
-var bool  bearishCHoCH   = false
+var int   trendDir    = 0
+var bool  bullBOS     = false, var bool bearBOS     = false
+var bool  bullCHoCH   = false, var bool bearCHoCH   = false
 
-bullishBOS   := false
-bearishBOS   := false
-bullishCHoCH := false
-bearishCHoCH := false
+bullBOS   := false ; bearBOS   := false
+bullCHoCH := false ; bearCHoCH := false
 
-// Bullish BOS: close above last confirmed swing high
 if not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
     if trendDir >= 0
-        bullishBOS := true
+        bullBOS   := true
     else
-        bullishCHoCH := true  // was bearish, now reclaiming → CHoCH
+        bullCHoCH := true
     trendDir := 1
-    bosLevel := lastSwingHigh
 
-// Bearish BOS: close below last confirmed swing low
 if not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
     if trendDir <= 0
-        bearishBOS := true
+        bearBOS   := true
     else
-        bearishCHoCH := true
+        bearCHoCH := true
     trendDir := -1
-    bosLevel := lastSwingLow
 
 // ─────────────────────────────────────────────
-// ░░  LIQUIDITY SWEEP DETECTION
+// ░░  LIQUIDITY SWEEP  (per-bar detection)
 // ─────────────────────────────────────────────
-// Sweep = wick pierces a prior swing level but CANDLE CLOSES BACK beyond it
+// Sweep = wick pierces prior swing but CLOSES back on the origin side.
 
-// Bull sweep: low goes below last swing low, close comes back above
-bullSweep = not na(lastSwingLow) and low < lastSwingLow and close > lastSwingLow
+bullSweep_bar = not na(lastSwingLow)  and low  < lastSwingLow  and close > lastSwingLow
+bearSweep_bar = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
 
-// Bear sweep: high goes above last swing high, close comes back below
-bearSweep = not na(lastSwingHigh) and high > lastSwingHigh and close < lastSwingHigh
+// Persist the sweep-low/high price for SL reference
+var float lastBullSweepLow  = na
+var float lastBearSweepHigh = na
 
-// Equal highs/lows (±0.05% tolerance)
-eqTol = close * 0.0005
-equalHighs = not na(lastSwingHigh) and not na(lastSwingHigh2) and math.abs(lastSwingHigh - lastSwingHigh2) <= eqTol
-equalLows  = not na(lastSwingLow)  and not na(lastSwingLow2)  and math.abs(lastSwingLow  - lastSwingLow2)  <= eqTol
+if bullSweep_bar
+    lastBullSweepLow  := low
+if bearSweep_bar
+    lastBearSweepHigh := high
+
+// Sweep within window → entry confirmation still valid
+recentBullSweep = ta.barssince(bullSweep_bar) <= i_sweepWindow
+recentBearSweep = ta.barssince(bearSweep_bar) <= i_sweepWindow
 
 // ─────────────────────────────────────────────
-// ░░  FAIR VALUE GAP (FVG) — 3-candle imbalance
+// ░░  FAIR VALUE GAP  (3-candle imbalance)
 // ─────────────────────────────────────────────
-// Bullish FVG: low[0] > high[2] (gap between candle -2 top and candle 0 bottom)
-// Bearish FVG: high[0] < low[2]
-// Minimum size filter using ATR.
 
-minFVGSize = atr * i_fvgMinATR
+minFVGSize  = atr * i_fvgMinATR
+bullFVG_bar = low    > high[2] and (low - high[2]) >= minFVGSize
+bearFVG_bar = high   < low[2]  and (low[2] - high) >= minFVGSize
 
-bullFVG_raw  = low    > high[2] and (low - high[2]) >= minFVGSize
-bearFVG_raw  = high   < low[2]  and (low[2] - high) >= minFVGSize
+var float bFVG_top = na, var float bFVG_bot = na, var bool bFVG_active = false
+var float vFVG_top = na, var float vFVG_bot = na, var bool vFVG_active = false
 
-// Store FVG zones for display (track last active zone)
-var float bFVG_top = na, var float bFVG_bot = na
-var float vFVG_top = na, var float vFVG_bot = na
-var bool  bFVG_active = false, var bool  vFVG_active = false
+if i_fvgEnable and bullFVG_bar
+    bFVG_top := low  ; bFVG_bot := high[2] ; bFVG_active := true
+if i_fvgEnable and bearFVG_bar
+    vFVG_top := low[2] ; vFVG_bot := high  ; vFVG_active := true
 
-if i_fvgEnable and bullFVG_raw
-    bFVG_top    := low
-    bFVG_bot    := high[2]
-    bFVG_active := true
-
-if i_fvgEnable and bearFVG_raw
-    vFVG_top    := low[2]
-    vFVG_bot    := high
-    vFVG_active := true
-
-// Deactivate when price enters zone
 if bFVG_active and close < bFVG_bot
     bFVG_active := false
 if vFVG_active and close > vFVG_top
     vFVG_active := false
 
-// Price in / near FVG
 priceInBullFVG = bFVG_active and close >= bFVG_bot and close <= bFVG_top
 priceInBearFVG = vFVG_active and close >= vFVG_bot and close <= vFVG_top
+recentBullFVG  = ta.barssince(bullFVG_bar) <= i_fvgWindow
+recentBearFVG  = ta.barssince(bearFVG_bar) <= i_fvgWindow
 
 // ─────────────────────────────────────────────
-// ░░  DISPLACEMENT CANDLE (Aggressive momentum)
+// ░░  DISPLACEMENT CANDLE
 // ─────────────────────────────────────────────
-// A displacement candle is a candle that:
-//   - body is larger than 1.5× ATR
-//   - closes in upper/lower 25% of its range
+// Large-body candle (> 1.5× ATR) closing in top/bottom 25% of range.
 
-bodySize = math.abs(close - open)
-range_   = high - low
-bullDisplace = bodySize > atr * 1.5 and close > open and close >= low  + range_ * 0.75
-bearDisplace = bodySize > atr * 1.5 and close < open and close <= high - range_ * 0.75
+bodySize      = math.abs(close - open)
+range_        = high - low
+bullDisplace_bar = bodySize > atr * 1.5 and close > open and close >= low  + range_ * 0.75
+bearDisplace_bar = bodySize > atr * 1.5 and close < open and close <= high - range_ * 0.75
+
+recentBullDisplace = ta.barssince(bullDisplace_bar) <= i_displLen
+recentBearDisplace = ta.barssince(bearDisplace_bar) <= i_displLen
 
 // ─────────────────────────────────────────────
-// ░░  CVD APPROXIMATION (delta proxy)
+// ░░  CVD  (cumulative delta proxy)
 // ─────────────────────────────────────────────
-// Approximate buy/sell volume via price position in candle range
-buyVolEst  = volume * ((close - low)  / math.max(high - low, 0.000001))
-sellVolEst = volume * ((high - close) / math.max(high - low, 0.000001))
-delta      = buyVolEst - sellVolEst
+
+buyVolEst = volume * ((close - low)  / math.max(high - low, 1e-10))
+sellVolEst = volume * ((high - close) / math.max(high - low, 1e-10))
+delta = buyVolEst - sellVolEst
 
 var float cvd = 0.0
 cvd := cvd[1] + delta
-cvdRising  = cvd > cvd[i_volLen]
-cvdFalling = cvd < cvd[i_volLen]
+
+cvdRising  = cvd > cvd[5]   // short window — more responsive
+cvdFalling = cvd < cvd[5]
+deltaPositive = delta > 0   // current bar buy pressure
+deltaNegative = delta < 0
 
 // ─────────────────────────────────────────────
 // ░░  TREND FILTERS
 // ─────────────────────────────────────────────
-// EMA alignment
-emaBull = ema9 > ema20 and ema20 > ema50
-emaBear = ema9 < ema20 and ema20 < ema50
 
-// VWAP bias
+emaBull = ema9 > ema20
+emaBear = ema9 < ema20
+emaBullStrong = ema9 > ema20 and ema20 > ema50
+emaBearStrong = ema9 < ema20 and ema20 < ema50
+
 vwapBull = close > vwap_val
 vwapBear = close < vwap_val
 
-// ATR volatility (avoid flat/dead markets)
-atrNorm       = atr / close * 100        // ATR as % of price
-minVolatility = atrNorm > 0.03           // at least 3 bps volatility
+// VWAP reclaim: price crossed above/below VWAP within recent bars
+vwapBullReclaim = ta.crossover(close,  vwap_val) or (vwapBull and ta.barssince(ta.crossover(close, vwap_val)) <= 3)
+vwapBearReclaim = ta.crossunder(close, vwap_val) or (vwapBear and ta.barssince(ta.crossunder(close, vwap_val)) <= 3)
 
-// RSI momentum
-rsiBull_ok = rsi > i_rsiBull
-rsiBear_ok = rsi < i_rsiBear
+atrNorm       = atr / close * 100
+minVolatility = atrNorm > 0.02   // > 2 bps ATR (very permissive lower bound)
 
-// ─────────────────────────────────────────────
-// ░░  FAKEOUT / CHOP FILTER
-// ─────────────────────────────────────────────
-// Avoid entries when:
-//   - Range is < 0.5× ATR (extremely tight candle)
-//   - Volume is below average
-//   - Price has already moved > 3R from structure (overextended)
-//   - RSI is in neutral zone (45–55) and no strong displacement
-
-choppyRange  = (high - low) < atr * 0.5
-lowVolume    = volume < avgVol * 0.8
-neutralMom   = rsi >= i_rsiBear and rsi <= i_rsiBull
-noDisplace   = not bullDisplace and not bearDisplace
-
-chopFilter   = choppyRange or lowVolume or (neutralMom and noDisplace)
+// RSI: directional bias with turning confirmation
+rsiLongOk  = rsi > i_rsiBullMin and rsi > rsi[2]    // above floor AND rising
+rsiShortOk = rsi < i_rsiBearMax and rsi < rsi[2]    // below ceiling AND falling
 
 // ─────────────────────────────────────────────
-// ░░  SIGNAL LOGIC
+// ░░  CHOP / FAKEOUT FILTER  (simplified)
+// ─────────────────────────────────────────────
+// Only block truly dead markets — don't over-filter sweep setups.
+
+choppyRange = (high - low) < atr * 0.4
+lowVolume   = volume < avgVol * 0.7
+chopFilter  = choppyRange or lowVolume
+
+// ─────────────────────────────────────────────
+// ░░  TWO-PHASE SIGNAL LOGIC
+// ─────────────────────────────────────────────
+//
+// PHASE 1 (Trigger): A liquidity sweep occurs. We record it.
+// PHASE 2 (Entry):   Within `sweepWindow` bars, ALL confirmations align.
+//                    THIS is the signal bar printed on chart.
+//
+// For longs: sweep fires when price wicks below a swing low and closes back.
+//            Entry triggers on a LATER bar (or same bar) when price confirms.
+//
+// This separates the "stop hunt" event from the "institutional entry" bar.
 // ─────────────────────────────────────────────
 
-// ── BUY SIGNAL CONDITIONS ──────────────────
-// 1. In active session
-// 2. Bullish structure (BOS or CHoCH) OR trend is already bull
-// 3. Liquidity sweep below lows (stop hunt)
-// 4. Strong reclaim above VWAP
-// 5. Volume expansion confirmed
-// 6. Bullish displacement OR price entering bullish FVG
-// 7. EMA alignment (at least ema9 > ema20)
-// 8. RSI above threshold
-// 9. No chop filter triggered
-// 10. CVD rising (buy pressure increasing)
+// ── BUY conditions ────────────────────────────────────────────────────────
+// Gate 1: In session
+// Gate 2: Recent sweep (within sweepWindow bars)
+// Gate 3: Bullish trend or neutral (not confirmed bear trend)
+// Gate 4: EMA short-term alignment
+// Gate 5: Price at or above VWAP
+// Gate 6: Displacement OR FVG formed recently
+// Gate 7: Volume above average
+// Gate 8: RSI above floor AND turning up
+// Gate 9: CVD/delta favors buyers
+// Gate 10: Not in chop
+// Gate 11: Minimum volatility present
 
-structureBull = (bullishBOS or bullishCHoCH or trendDir == 1)
-reclaim_bull  = close > vwap_val and vwap_val[1] >= close[1]  // reclaimed VWAP this bar
+cond_ses_L     = inSession
+cond_sweep_L   = recentBullSweep
+cond_struct_L  = trendDir >= 0 or emaBull          // not confirmed bear; EMA acts as fallback
+cond_ema_L     = emaBull                            // ema9 > ema20
+cond_vwap_L    = vwapBull                           // close above VWAP
+cond_impulse_L = recentBullDisplace or priceInBullFVG or recentBullFVG
+cond_vol_L     = volSpike or relVol > 1.0           // softer: above-avg vol ok
+cond_rsi_L     = rsiLongOk
+cond_cvd_L     = cvdRising or deltaPositive         // cumulative OR current bar
+cond_chop_L    = not chopFilter
+cond_atr_L     = minVolatility
 
-buyCondition = inSession
-     and structureBull
-     and bullSweep
-     and vwapBull
-     and volSpike
-     and (bullDisplace or priceInBullFVG)
-     and (ema9 > ema20)
-     and rsiBull_ok
-     and not chopFilter
-     and cvdRising
-     and minVolatility
+buyCondition = cond_ses_L and cond_sweep_L and cond_struct_L
+     and cond_ema_L and cond_vwap_L and cond_impulse_L
+     and cond_vol_L and cond_rsi_L  and cond_cvd_L
+     and cond_chop_L and cond_atr_L
 
-// ── SELL SIGNAL CONDITIONS ─────────────────
-structureBear = (bearishBOS or bearishCHoCH or trendDir == -1)
-reclaim_bear  = close < vwap_val and vwap_val[1] <= close[1]
+// ── SELL conditions ───────────────────────────────────────────────────────
 
-sellCondition = inSession
-     and structureBear
-     and bearSweep
-     and vwapBear
-     and volSpike
-     and (bearDisplace or priceInBearFVG)
-     and (ema9 < ema20)
-     and rsiBear_ok
-     and not chopFilter
-     and cvdFalling
-     and minVolatility
+cond_ses_S     = inSession
+cond_sweep_S   = recentBearSweep
+cond_struct_S  = trendDir <= 0 or emaBear
+cond_ema_S     = emaBear
+cond_vwap_S    = vwapBear
+cond_impulse_S = recentBearDisplace or priceInBearFVG or recentBearFVG
+cond_vol_S     = volSpike or relVol > 1.0
+cond_rsi_S     = rsiShortOk
+cond_cvd_S     = cvdFalling or deltaNegative
+cond_chop_S    = not chopFilter
+cond_atr_S     = minVolatility
 
-// Ensure signals only on confirmed candle close (process_orders_on_close=true handles this)
-// Gate: no active trade already open
+sellCondition = cond_ses_S and cond_sweep_S and cond_struct_S
+     and cond_ema_S and cond_vwap_S and cond_impulse_S
+     and cond_vol_S and cond_rsi_S  and cond_cvd_S
+     and cond_chop_S and cond_atr_S
+
 noActiveTrade = strategy.position_size == 0
 
 buySignal  = buyCondition  and noActiveTrade
 sellSignal = sellCondition and noActiveTrade
 
 // ─────────────────────────────────────────────
-// ░░  STOP LOSS CALCULATION
+// ░░  STOP LOSS
 // ─────────────────────────────────────────────
-// Place SL beyond the liquidity sweep wick + ATR buffer
 
 atrBuffer = atr * i_atrMult
 
@@ -374,34 +355,32 @@ var float longSL  = na
 var float shortSL = na
 
 if buySignal
-    // SL = below the sweep low (the wick that swept lows) + buffer
-    longSL := math.min(low, lastSwingLow) - atrBuffer
+    // SL below the lowest point of the sweep wick
+    float sweepLow = na(lastBullSweepLow) ? lastSwingLow : math.min(lastBullSweepLow, lastSwingLow)
+    longSL := sweepLow - atrBuffer
 
 if sellSignal
-    // SL = above the sweep high + buffer
-    shortSL := math.max(high, lastSwingHigh) + atrBuffer
+    float sweepHigh = na(lastBearSweepHigh) ? lastSwingHigh : math.max(lastBearSweepHigh, lastSwingHigh)
+    shortSL := sweepHigh + atrBuffer
 
 // ─────────────────────────────────────────────
-// ░░  TAKE PROFIT CALCULATION
+// ░░  TAKE PROFIT  (R-multiples)
 // ─────────────────────────────────────────────
 
-var float entryPrice = na
-var float longTP1    = na, var float longTP2 = na
-var float longTP3    = na, var float longRun = na
-var float shortTP1   = na, var float shortTP2 = na
-var float shortTP3   = na, var float shortRun = na
+var float longTP1 = na, var float longTP2  = na
+var float longTP3 = na, var float longRun  = na
+var float shortTP1= na, var float shortTP2 = na
+var float shortTP3= na, var float shortRun = na
 
-if buySignal
-    entryPrice := close
-    float riskL  = close - longSL
+if buySignal and not na(longSL)
+    riskL    = close - longSL
     longTP1 := close + riskL * i_tp1R
     longTP2 := close + riskL * i_tp2R
     longTP3 := close + riskL * i_tp3R
     longRun := close + riskL * i_runR
 
-if sellSignal
-    entryPrice := close
-    float riskS  = shortSL - close
+if sellSignal and not na(shortSL)
+    riskS     = shortSL - close
     shortTP1 := close - riskS * i_tp1R
     shortTP2 := close - riskS * i_tp2R
     shortTP3 := close - riskS * i_tp3R
@@ -411,159 +390,175 @@ if sellSignal
 // ░░  STRATEGY EXECUTION
 // ─────────────────────────────────────────────
 
-// Long entries
 if buySignal
     strategy.entry("Long", strategy.long, comment="ISP Buy")
 
-// Short entries
 if sellSignal
     strategy.entry("Short", strategy.short, comment="ISP Sell")
 
-// Long exits — partial closes at TP levels + full stop
 if strategy.position_size > 0 and not na(longSL)
-    strategy.exit("L-TP1",  "Long", qty_percent=i_tp1pct,
-         limit=longTP1, stop=longSL, comment="TP1")
-    strategy.exit("L-TP2",  "Long", qty_percent=i_tp2pct,
-         limit=longTP2, stop=longSL, comment="TP2")
-    strategy.exit("L-TP3",  "Long", qty_percent=i_tp3pct,
-         limit=longTP3, stop=longSL, comment="TP3")
-    strategy.exit("L-Run",  "Long", qty_percent=100,
-         limit=longRun,  stop=longSL, comment="Runner")
+    strategy.exit("L-TP1", "Long", qty_percent=i_tp1pct, limit=longTP1, stop=longSL, comment="TP1")
+    strategy.exit("L-TP2", "Long", qty_percent=i_tp2pct, limit=longTP2, stop=longSL, comment="TP2")
+    strategy.exit("L-TP3", "Long", qty_percent=i_tp3pct, limit=longTP3, stop=longSL, comment="TP3")
+    strategy.exit("L-Run", "Long", qty_percent=100,       limit=longRun,  stop=longSL, comment="Runner")
 
-// Short exits
 if strategy.position_size < 0 and not na(shortSL)
-    strategy.exit("S-TP1",  "Short", qty_percent=i_tp1pct,
-         limit=shortTP1, stop=shortSL, comment="TP1")
-    strategy.exit("S-TP2",  "Short", qty_percent=i_tp2pct,
-         limit=shortTP2, stop=shortSL, comment="TP2")
-    strategy.exit("S-TP3",  "Short", qty_percent=i_tp3pct,
-         limit=shortTP3, stop=shortSL, comment="TP3")
-    strategy.exit("S-Run",  "Short", qty_percent=100,
-         limit=shortRun,  stop=shortSL, comment="Runner")
+    strategy.exit("S-TP1", "Short", qty_percent=i_tp1pct, limit=shortTP1, stop=shortSL, comment="TP1")
+    strategy.exit("S-TP2", "Short", qty_percent=i_tp2pct, limit=shortTP2, stop=shortSL, comment="TP2")
+    strategy.exit("S-TP3", "Short", qty_percent=i_tp3pct, limit=shortTP3, stop=shortSL, comment="TP3")
+    strategy.exit("S-Run", "Short", qty_percent=100,       limit=shortRun,  stop=shortSL, comment="Runner")
 
 // ─────────────────────────────────────────────
 // ░░  VISUAL LAYER
 // ─────────────────────────────────────────────
 
-// Session background
 bgcolor(i_showSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
 
-// EMAs
-plot(i_showEMAs ? ema9  : na, "EMA 9",  color=color.new(color.yellow,  0), linewidth=1)
-plot(i_showEMAs ? ema20 : na, "EMA 20", color=color.new(color.orange,  0), linewidth=1)
-plot(i_showEMAs ? ema50 : na, "EMA 50", color=color.new(color.red,     0), linewidth=2)
-
-// VWAP
+plot(i_showEMAs ? ema9  : na, "EMA 9",  color=color.new(color.yellow, 0), linewidth=1)
+plot(i_showEMAs ? ema20 : na, "EMA 20", color=color.new(color.orange, 0), linewidth=1)
+plot(i_showEMAs ? ema50 : na, "EMA 50", color=color.new(color.red,    0), linewidth=2)
 plot(i_showVWAP ? vwap_val : na, "VWAP", color=color.new(color.purple, 0), linewidth=2)
 
-// Session High / Low
 plot(i_showSesHL and inSession ? sessionHigh : na, "Sess High", color=color.new(color.teal,   0), style=plot.style_stepline, linewidth=1)
 plot(i_showSesHL and inSession ? sessionLow  : na, "Sess Low",  color=color.new(color.maroon, 0), style=plot.style_stepline, linewidth=1)
 
 // BOS / CHoCH labels
-plotshape(i_showBOSLine and bullishBOS,   style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,   0), text="BOS",   textcolor=color.black, size=size.tiny, title="Bull BOS")
-plotshape(i_showBOSLine and bearishBOS,   style=shape.labeldown, location=location.abovebar, color=color.new(color.red,    0), text="BOS",   textcolor=color.white, size=size.tiny, title="Bear BOS")
-plotshape(i_showBOSLine and bullishCHoCH, style=shape.labelup,   location=location.belowbar, color=color.new(color.aqua,   0), text="CHoCH", textcolor=color.black, size=size.tiny, title="Bull CHoCH")
-plotshape(i_showBOSLine and bearishCHoCH, style=shape.labeldown, location=location.abovebar, color=color.new(color.fuchsia,0), text="CHoCH", textcolor=color.white, size=size.tiny, title="Bear CHoCH")
+plotshape(i_showBOS and bullBOS,   style=shape.labelup,   location=location.belowbar, color=color.new(color.lime,    0), text="BOS",   textcolor=color.black, size=size.tiny, title="Bull BOS")
+plotshape(i_showBOS and bearBOS,   style=shape.labeldown, location=location.abovebar, color=color.new(color.red,     0), text="BOS",   textcolor=color.white, size=size.tiny, title="Bear BOS")
+plotshape(i_showBOS and bullCHoCH, style=shape.labelup,   location=location.belowbar, color=color.new(color.aqua,    0), text="CHoCH", textcolor=color.black, size=size.tiny, title="Bull CHoCH")
+plotshape(i_showBOS and bearCHoCH, style=shape.labeldown, location=location.abovebar, color=color.new(color.fuchsia, 0), text="CHoCH", textcolor=color.white, size=size.tiny, title="Bear CHoCH")
 
-// FVG Boxes — use lines to draw zone borders (boxes require bar-index tracking)
-var line fvgBullTop = na, var line fvgBullBot = na
-var line fvgBearTop = na, var line fvgBearBot = na
+// Sweep dots
+plotshape(bullSweep_bar, style=shape.circle, location=location.belowbar, color=color.new(color.lime, 30),  size=size.tiny, title="Bull Sweep")
+plotshape(bearSweep_bar, style=shape.circle, location=location.abovebar, color=color.new(color.red,  30),  size=size.tiny, title="Bear Sweep")
 
-if i_showFVG and i_fvgEnable and bullFVG_raw
-    fvgBullTop := line.new(bar_index, bFVG_top, bar_index + 20, bFVG_top, color=color.new(color.green, 50), style=line.style_dashed, width=1)
-    fvgBullBot := line.new(bar_index, bFVG_bot, bar_index + 20, bFVG_bot, color=color.new(color.green, 50), style=line.style_dashed, width=1)
+// FVG zone lines
+if i_showFVG and i_fvgEnable
+    if bullFVG_bar
+        line.new(bar_index, low,     bar_index + 20, low,     color=color.new(color.green, 50), style=line.style_dashed, width=1)
+        line.new(bar_index, high[2], bar_index + 20, high[2], color=color.new(color.green, 50), style=line.style_dashed, width=1)
+    if bearFVG_bar
+        line.new(bar_index, low[2],  bar_index + 20, low[2],  color=color.new(color.red,   50), style=line.style_dashed, width=1)
+        line.new(bar_index, high,    bar_index + 20, high,    color=color.new(color.red,   50), style=line.style_dashed, width=1)
 
-if i_showFVG and i_fvgEnable and bearFVG_raw
-    fvgBearTop := line.new(bar_index, vFVG_top, bar_index + 20, vFVG_top, color=color.new(color.red,   50), style=line.style_dashed, width=1)
-    fvgBearBot := line.new(bar_index, vFVG_bot, bar_index + 20, vFVG_bot, color=color.new(color.red,   50), style=line.style_dashed, width=1)
-
-// Buy / Sell arrows
+// Entry arrows
 plotshape(buySignal,  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.normal, title="Buy Signal")
 plotshape(sellSignal, style=shape.triangledown, location=location.abovebar, color=color.new(color.red,  0), size=size.normal, title="Sell Signal")
 
-// SL / TP lines on signal bars
-var line slLine   = na, var line tp1Line  = na
-var line tp2Line  = na, var line tp3Line  = na, var line runLine  = na
-
-drawTPLines(float entry_, float sl_, float tp1_, float tp2_, float tp3_, float run_, bool isBuy) =>
-    col_sl  = color.new(color.red,   20)
-    col_tp1 = color.new(color.lime,  20)
-    col_tp2 = color.new(color.green, 20)
-    col_tp3 = color.new(color.teal,  20)
-    col_run = color.new(color.aqua,  20)
-    ext     = bar_index + 30
-    line.new(bar_index, sl_,   ext, sl_,   color=col_sl,  style=line.style_dashed, width=1)
-    line.new(bar_index, tp1_,  ext, tp1_,  color=col_tp1, style=line.style_dashed, width=1)
-    line.new(bar_index, tp2_,  ext, tp2_,  color=col_tp2, style=line.style_dashed, width=1)
-    line.new(bar_index, tp3_,  ext, tp3_,  color=col_tp3, style=line.style_dashed, width=1)
-    line.new(bar_index, run_,  ext, run_,  color=col_run, style=line.style_dashed, width=1)
-
-if i_showSLTP and buySignal and not na(longSL)
-    drawTPLines(close, longSL, longTP1, longTP2, longTP3, longRun, true)
-
-if i_showSLTP and sellSignal and not na(shortSL)
-    drawTPLines(close, shortSL, shortTP1, shortTP2, shortTP3, shortRun, false)
+// SL / TP dashed lines on signal bar
+if i_showSLTP
+    if buySignal and not na(longSL)
+        line.new(bar_index, longSL,  bar_index + 30, longSL,  color=color.new(color.red,   20), style=line.style_dashed, width=1)
+        line.new(bar_index, longTP1, bar_index + 30, longTP1, color=color.new(color.lime,  20), style=line.style_dashed, width=1)
+        line.new(bar_index, longTP2, bar_index + 30, longTP2, color=color.new(color.green, 20), style=line.style_dashed, width=1)
+        line.new(bar_index, longTP3, bar_index + 30, longTP3, color=color.new(color.teal,  20), style=line.style_dashed, width=1)
+        line.new(bar_index, longRun, bar_index + 30, longRun, color=color.new(color.aqua,  20), style=line.style_dashed, width=1)
+    if sellSignal and not na(shortSL)
+        line.new(bar_index, shortSL,  bar_index + 30, shortSL,  color=color.new(color.red,   20), style=line.style_dashed, width=1)
+        line.new(bar_index, shortTP1, bar_index + 30, shortTP1, color=color.new(color.lime,  20), style=line.style_dashed, width=1)
+        line.new(bar_index, shortTP2, bar_index + 30, shortTP2, color=color.new(color.green, 20), style=line.style_dashed, width=1)
+        line.new(bar_index, shortTP3, bar_index + 30, shortTP3, color=color.new(color.teal,  20), style=line.style_dashed, width=1)
+        line.new(bar_index, shortRun, bar_index + 30, shortRun, color=color.new(color.aqua,  20), style=line.style_dashed, width=1)
 
 // ─────────────────────────────────────────────
 // ░░  DASHBOARD
 // ─────────────────────────────────────────────
 
 if i_showDash
-    // Build status strings
-    string trendStr  = trendDir == 1  ? "▲ BULL"  : trendDir == -1 ? "▼ BEAR" : "── NEUT"
-    string sessStr   = inSession       ? "✔ ACTIVE" : "✖ OFF"
-    string volStr    = volSpike        ? "HIGH"     : relVol > 1.0 ? "NORM" : "LOW"
-    string vwapStr   = vwapBull        ? "ABOVE"    : "BELOW"
-    string rsiStr    = str.tostring(math.round(rsi, 1))
-    string emaStr    = emaBull         ? "ALIGNED ▲" : emaBear ? "ALIGNED ▼" : "MIXED"
-    string atrStr    = str.tostring(math.round(atr, 4))
-    string posStr    = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
-    string winStr    = strategy.wintrades > 0 or strategy.losstrades > 0
+    string trendStr = trendDir == 1 ? "▲ BULL" : trendDir == -1 ? "▼ BEAR" : "── NEUT"
+    string sessStr  = inSession     ? "✔ ACTIVE" : "✖ OFF"
+    string volStr   = volSpike      ? "SPIKE" : relVol > 1.0 ? "NORM" : "LOW"
+    string vwapStr  = vwapBull      ? "ABOVE" : "BELOW"
+    string rsiStr   = str.tostring(math.round(rsi, 1))
+    string emaStr   = emaBullStrong ? "▲▲ STRONG" : emaBull ? "▲ BULL" : emaBearStrong ? "▼▼ STRONG" : emaBear ? "▼ BEAR" : "MIXED"
+    string sweepStr = recentBullSweep ? "BULL SWEEP" : recentBearSweep ? "BEAR SWEEP" : "─"
+    string posStr   = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    string winStr   = (strategy.wintrades + strategy.losstrades) > 0
          ? str.tostring(math.round(strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100, 1)) + "%"
          : "N/A"
-    string pfStr     = strategy.grossprofit > 0 and strategy.grossloss > 0
-         ? str.tostring(math.round(strategy.grossprofit / strategy.grossloss, 2))
+    string pfStr    = strategy.grossloss != 0
+         ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
          : "N/A"
-    string netPnlStr = "$" + str.tostring(math.round(strategy.netprofit, 2))
 
-    dashText = "═══ ISP DASHBOARD ═══\n"
-         + "Trend   : " + trendStr + "\n"
+    dashText = "═══ ISP v1.1 ═══\n"
          + "Session : " + sessStr  + "\n"
+         + "Trend   : " + trendStr + "\n"
+         + "EMA     : " + emaStr   + "\n"
          + "VWAP    : " + vwapStr  + "\n"
          + "Volume  : " + volStr   + " (" + str.tostring(math.round(relVol, 2)) + "x)\n"
          + "RSI     : " + rsiStr   + "\n"
-         + "EMA     : " + emaStr   + "\n"
-         + "ATR     : " + atrStr   + "\n"
-         + "─────────────────────\n"
+         + "Sweep   : " + sweepStr + "\n"
+         + "────────────────\n"
          + "Position: " + posStr   + "\n"
          + "Win Rate: " + winStr   + "\n"
          + "Prof Fac: " + pfStr    + "\n"
-         + "Net P&L : " + netPnlStr
+         + "Net P&L : $" + str.tostring(math.round(strategy.netprofit, 2))
 
-    var table dash = table.new(position.top_right, 1, 1, bgcolor=color.new(color.black, 10), border_color=color.new(color.gray, 30), border_width=1, frame_color=color.new(color.gray, 20), frame_width=1)
+    var table dash = table.new(position.top_right, 1, 1,
+         bgcolor=color.new(color.black, 10),
+         border_color=color.new(color.gray, 30), border_width=1,
+         frame_color=color.new(color.gray, 20),  frame_width=1)
     table.cell(dash, 0, 0, dashText,
          text_color=color.new(color.white, 0),
          text_size=size.small,
          bgcolor=color.new(color.black, 15))
 
 // ─────────────────────────────────────────────
-// ░░  ALERT CONDITIONS
+// ░░  CONDITION DEBUG TABLE  (toggle on to diagnose why no signal)
 // ─────────────────────────────────────────────
 
-alertcondition(buySignal,  title="ISP — Buy Signal",  message="ISP Buy Signal fired | {{ticker}} @ {{close}} | Time: {{time}}")
-alertcondition(sellSignal, title="ISP — Sell Signal", message="ISP Sell Signal fired | {{ticker}} @ {{close}} | Time: {{time}}")
+if i_showDebug
+    bool  isL = true   // show long-side debug
 
-alertcondition(bullishBOS,   title="ISP — Bullish BOS",   message="Bullish Break of Structure | {{ticker}} @ {{close}}")
-alertcondition(bearishBOS,   title="ISP — Bearish BOS",   message="Bearish Break of Structure | {{ticker}} @ {{close}}")
-alertcondition(bullishCHoCH, title="ISP — Bullish CHoCH", message="Bullish Change of Character | {{ticker}} @ {{close}}")
-alertcondition(bearishCHoCH, title="ISP — Bearish CHoCH", message="Bearish Change of Character | {{ticker}} @ {{close}}")
+    ok(bool b) => b ? "✔" : "✗"
 
-alertcondition(bullSweep, title="ISP — Liquidity Sweep Low",  message="Liq sweep below lows | {{ticker}} @ {{close}}")
-alertcondition(bearSweep, title="ISP — Liquidity Sweep High", message="Liq sweep above highs | {{ticker}} @ {{close}}")
+    dbgText = "── LONG CONDITION DEBUG ──\n"
+         + ok(cond_ses_L)     + " Session active\n"
+         + ok(cond_sweep_L)   + " Recent bull sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + " bars)\n"
+         + ok(cond_struct_L)  + " Structure (trendDir=" + str.tostring(trendDir) + ")\n"
+         + ok(cond_ema_L)     + " EMA9 > EMA20\n"
+         + ok(cond_vwap_L)    + " Above VWAP\n"
+         + ok(cond_impulse_L) + " Displacement / FVG\n"
+         + ok(cond_vol_L)     + " Volume (" + str.tostring(math.round(relVol, 2)) + "x)\n"
+         + ok(cond_rsi_L)     + " RSI (" + str.tostring(math.round(rsi, 1)) + " > " + str.tostring(i_rsiBullMin) + " & rising)\n"
+         + ok(cond_cvd_L)     + " CVD/Delta positive\n"
+         + ok(cond_chop_L)    + " No chop\n"
+         + ok(cond_atr_L)     + " Volatility OK\n"
+         + "── SHORT CONDITION DEBUG ──\n"
+         + ok(cond_ses_S)     + " Session active\n"
+         + ok(cond_sweep_S)   + " Recent bear sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + " bars)\n"
+         + ok(cond_struct_S)  + " Structure\n"
+         + ok(cond_ema_S)     + " EMA9 < EMA20\n"
+         + ok(cond_vwap_S)    + " Below VWAP\n"
+         + ok(cond_impulse_S) + " Displacement / FVG\n"
+         + ok(cond_vol_S)     + " Volume\n"
+         + ok(cond_rsi_S)     + " RSI (" + str.tostring(math.round(rsi, 1)) + " < " + str.tostring(i_rsiBearMax) + " & falling)\n"
+         + ok(cond_cvd_S)     + " CVD/Delta negative\n"
+         + ok(cond_chop_S)    + " No chop\n"
+         + ok(cond_atr_S)     + " Volatility OK"
 
-alertcondition(trendDir == 1  and trendDir[1] != 1,  title="ISP — Trend Flipped Bull", message="Trend bias changed to BULLISH | {{ticker}}")
-alertcondition(trendDir == -1 and trendDir[1] != -1, title="ISP — Trend Flipped Bear", message="Trend bias changed to BEARISH | {{ticker}}")
+    var table dbg = table.new(position.bottom_left, 1, 1,
+         bgcolor=color.new(color.black, 10),
+         border_color=color.new(color.gray, 30), border_width=1)
+    table.cell(dbg, 0, 0, dbgText,
+         text_color=color.new(color.white, 0),
+         text_size=size.tiny,
+         bgcolor=color.new(color.black, 15))
+
+// ─────────────────────────────────────────────
+// ░░  ALERTS
+// ─────────────────────────────────────────────
+
+alertcondition(buySignal,      title="ISP — Buy Signal",        message="ISP Buy | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(sellSignal,     title="ISP — Sell Signal",       message="ISP Sell | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bullSweep_bar,  title="ISP — Bull Sweep",        message="Bullish liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweep_bar,  title="ISP — Bear Sweep",        message="Bearish liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bullBOS,        title="ISP — Bullish BOS",       message="Bullish BOS | {{ticker}} @ {{close}}")
+alertcondition(bearBOS,        title="ISP — Bearish BOS",       message="Bearish BOS | {{ticker}} @ {{close}}")
+alertcondition(bullCHoCH,      title="ISP — Bullish CHoCH",     message="Bullish CHoCH | {{ticker}} @ {{close}}")
+alertcondition(bearCHoCH,      title="ISP — Bearish CHoCH",     message="Bearish CHoCH | {{ticker}} @ {{close}}")
+alertcondition(trendDir == 1  and trendDir[1] != 1,  title="ISP — Trend → BULL", message="Trend flipped BULLISH | {{ticker}}")
+alertcondition(trendDir == -1 and trendDir[1] != -1, title="ISP — Trend → BEAR", message="Trend flipped BEARISH | {{ticker}}")
 
 // ─────────────────────────────────────────────
 // ░░  END OF SCRIPT
