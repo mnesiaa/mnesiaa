@@ -22,8 +22,8 @@
 
 //@version=6
 strategy(
-     title            = "Institutional Scalper Pro v1.1",
-     shorttitle       = "ISP v1.1",
+     title            = "Institutional Scalper Pro v1.2",
+     shorttitle       = "ISP v1.2",
      overlay          = true,
      pyramiding       = 0,
      default_qty_type = strategy.percent_of_equity,
@@ -355,13 +355,16 @@ var float longSL  = na
 var float shortSL = na
 
 if buySignal
-    // SL below the lowest point of the sweep wick
-    float sweepLow = na(lastBullSweepLow) ? lastSwingLow : math.min(lastBullSweepLow, lastSwingLow)
-    longSL := sweepLow - atrBuffer
+    // SL = lowest of the sweep wick and last swing low, minus ATR buffer
+    float fallbackLow  = nz(lastSwingLow, low)
+    float sweepLow     = na(lastBullSweepLow) ? fallbackLow : math.min(lastBullSweepLow, fallbackLow)
+    longSL := math.min(sweepLow, low) - atrBuffer   // also consider current bar low
 
 if sellSignal
-    float sweepHigh = na(lastBearSweepHigh) ? lastSwingHigh : math.max(lastBearSweepHigh, lastSwingHigh)
-    shortSL := sweepHigh + atrBuffer
+    // SL = highest of the sweep wick and last swing high, plus ATR buffer
+    float fallbackHigh = nz(lastSwingHigh, high)
+    float sweepHigh    = na(lastBearSweepHigh) ? fallbackHigh : math.max(lastBearSweepHigh, fallbackHigh)
+    shortSL := math.max(sweepHigh, high) + atrBuffer
 
 // ─────────────────────────────────────────────
 // ░░  TAKE PROFIT  (R-multiples)
@@ -445,20 +448,75 @@ if i_showFVG and i_fvgEnable
 plotshape(buySignal,  style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), size=size.normal, title="Buy Signal")
 plotshape(sellSignal, style=shape.triangledown, location=location.abovebar, color=color.new(color.red,  0), size=size.normal, title="Sell Signal")
 
-// SL / TP dashed lines on signal bar
+// ── SL / TP  lines + labels ───────────────────────────────────────────────
+// Helper: draw one horizontal level with a text label at the right end.
+drawLevel(int x0, float price, int ext, color lineCol, color lblCol, color txtCol, string txt) =>
+    line.new(x0, price, ext, price,
+         color=lineCol, style=line.style_dashed, width=1)
+    label.new(ext, price, txt,
+         color=lblCol, textcolor=txtCol,
+         style=label.style_label_left, size=size.small, xloc=xloc.bar_index)
+
 if i_showSLTP
+    int ext = bar_index + 35   // how many bars the lines extend to the right
+
     if buySignal and not na(longSL)
-        line.new(bar_index, longSL,  bar_index + 30, longSL,  color=color.new(color.red,   20), style=line.style_dashed, width=1)
-        line.new(bar_index, longTP1, bar_index + 30, longTP1, color=color.new(color.lime,  20), style=line.style_dashed, width=1)
-        line.new(bar_index, longTP2, bar_index + 30, longTP2, color=color.new(color.green, 20), style=line.style_dashed, width=1)
-        line.new(bar_index, longTP3, bar_index + 30, longTP3, color=color.new(color.teal,  20), style=line.style_dashed, width=1)
-        line.new(bar_index, longRun, bar_index + 30, longRun, color=color.new(color.aqua,  20), style=line.style_dashed, width=1)
+        p(float v) => str.tostring(math.round(v, 2))
+        riskL = close - longSL
+
+        // Entry label on the signal candle
+        label.new(bar_index, low - atr * 0.6,
+             "▲ LONG  @ " + p(close) + "\nRisk  " + p(riskL) + " pts",
+             color=color.new(color.lime, 10), textcolor=color.black,
+             style=label.style_label_up, size=size.small, xloc=xloc.bar_index)
+
+        // SL line (red)
+        drawLevel(bar_index, longSL,  ext,
+             color.new(color.red,   0), color.new(color.red,   10), color.white,
+             "SL  " + p(longSL))
+
+        // TP lines (green shades)
+        drawLevel(bar_index, longTP1, ext,
+             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
+             "TP1  " + p(longTP1) + "  (" + str.tostring(i_tp1R) + "R)")
+        drawLevel(bar_index, longTP2, ext,
+             color.new(color.green, 0), color.new(color.green, 10), color.white,
+             "TP2  " + p(longTP2) + "  (" + str.tostring(i_tp2R) + "R)")
+        drawLevel(bar_index, longTP3, ext,
+             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
+             "TP3  " + p(longTP3) + "  (" + str.tostring(i_tp3R) + "R)")
+        drawLevel(bar_index, longRun, ext,
+             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
+             "RUN  " + p(longRun)  + "  (" + str.tostring(i_runR)  + "R)")
+
     if sellSignal and not na(shortSL)
-        line.new(bar_index, shortSL,  bar_index + 30, shortSL,  color=color.new(color.red,   20), style=line.style_dashed, width=1)
-        line.new(bar_index, shortTP1, bar_index + 30, shortTP1, color=color.new(color.lime,  20), style=line.style_dashed, width=1)
-        line.new(bar_index, shortTP2, bar_index + 30, shortTP2, color=color.new(color.green, 20), style=line.style_dashed, width=1)
-        line.new(bar_index, shortTP3, bar_index + 30, shortTP3, color=color.new(color.teal,  20), style=line.style_dashed, width=1)
-        line.new(bar_index, shortRun, bar_index + 30, shortRun, color=color.new(color.aqua,  20), style=line.style_dashed, width=1)
+        p(float v) => str.tostring(math.round(v, 2))
+        riskS = shortSL - close
+
+        // Entry label on the signal candle
+        label.new(bar_index, high + atr * 0.6,
+             "▼ SHORT  @ " + p(close) + "\nRisk  " + p(riskS) + " pts",
+             color=color.new(color.red, 10), textcolor=color.white,
+             style=label.style_label_down, size=size.small, xloc=xloc.bar_index)
+
+        // SL line (red)
+        drawLevel(bar_index, shortSL,  ext,
+             color.new(color.red,   0), color.new(color.red,   10), color.white,
+             "SL  " + p(shortSL))
+
+        // TP lines (green shades)
+        drawLevel(bar_index, shortTP1, ext,
+             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
+             "TP1  " + p(shortTP1) + "  (" + str.tostring(i_tp1R) + "R)")
+        drawLevel(bar_index, shortTP2, ext,
+             color.new(color.green, 0), color.new(color.green, 10), color.white,
+             "TP2  " + p(shortTP2) + "  (" + str.tostring(i_tp2R) + "R)")
+        drawLevel(bar_index, shortTP3, ext,
+             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
+             "TP3  " + p(shortTP3) + "  (" + str.tostring(i_tp3R) + "R)")
+        drawLevel(bar_index, shortRun, ext,
+             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
+             "RUN  " + p(shortRun)  + "  (" + str.tostring(i_runR)  + "R)")
 
 // ─────────────────────────────────────────────
 // ░░  DASHBOARD
@@ -480,7 +538,7 @@ if i_showDash
          ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
          : "N/A"
 
-    dashText = "═══ ISP v1.1 ═══\n"
+    dashText = "═══ ISP v1.2 ═══\n"
          + "Session : " + sessStr  + "\n"
          + "Trend   : " + trendStr + "\n"
          + "EMA     : " + emaStr   + "\n"
