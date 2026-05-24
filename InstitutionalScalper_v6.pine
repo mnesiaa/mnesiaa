@@ -640,11 +640,7 @@ if i_showDash
     string td = trendDir == 1 ? "BULL" : trendDir == -1 ? "BEAR" : "NEUT"
     string sv = inEntryWin ? "ACTIVE" : inSession ? "WIND-DOWN" : "OFF"
     string vl = volSpike ? "SPIKE" : relVol > 1.0 ? "NORM" : "LOW"
-    string vw = close > vwapU2   ? "ABOVE +2SD" :
-                close > vwapU1   ? "ABOVE +1SD" :
-                close > vwap_val ? "ABOVE"       :
-                close > vwapD1   ? "BELOW"       :
-                close > vwapD2   ? "BELOW -1SD"  : "BELOW -2SD"
+    string vw = close > vwapU2 ? "ABOVE +2SD" : close > vwapU1 ? "ABOVE +1SD" : close > vwap_val ? "ABOVE" : close > vwapD1 ? "BELOW" : close > vwapD2 ? "BELOW -1SD" : "BELOW -2SD"
     string em = emaBull ? "BULL" : "BEAR"
     string sw = recentBullSweep ? "BULL SWEEP" : recentBearSweep ? "BEAR SWEEP" : "none"
     string po = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
