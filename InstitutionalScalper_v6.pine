@@ -80,6 +80,15 @@ i_showSLTP  = input.bool(true,  "Show SL TP Lines",      group = "Visual")
 i_showDash  = input.bool(true,  "Show Dashboard",        group = "Visual")
 i_showDebug = input.bool(false, "Show Condition Debug",  group = "Visual")
 
+i_vwapSigOn     = input.bool(true,   "Enable VWAP Cross Signals",  group = "VWAP Signals")
+i_vwapSessStart = input.int(930,     "NY Session Start HHMM EST",  group = "VWAP Signals")
+i_vwapSessEnd   = input.int(1600,    "NY Session End HHMM EST",    group = "VWAP Signals")
+i_vwapSLMult    = input.float(1.0,   "SL ATR Multiplier",          minval = 0.3, step = 0.1,  group = "VWAP Signals")
+i_vwapTP1R      = input.float(1.5,   "TP1 R",                      minval = 0.5, step = 0.25, group = "VWAP Signals")
+i_vwapTP2R      = input.float(3.0,   "TP2 R",                      minval = 1.0, step = 0.25, group = "VWAP Signals")
+i_showVWAPSig   = input.bool(true,   "Show VWAP Signal Levels",    group = "VWAP Signals")
+i_showNYFullBG  = input.bool(false,  "Shade Full NY Session BG",   group = "VWAP Signals")
+
 // ===========================================================
 // BASE INDICATORS
 // ===========================================================
@@ -103,6 +112,7 @@ volSpike = relVol >= i_volThresh
 
 barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
 inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+inNYFull  = barHHMM >= i_vwapSessStart and barHHMM < i_vwapSessEnd
 
 var float sessionHigh = na
 var float sessionLow  = na
@@ -292,6 +302,35 @@ buySignal  = buyCondition  and noPos
 sellSignal = sellCondition and noPos
 
 // ===========================================================
+// VWAP CROSS SIGNALS  (standalone NY-session VWAP crossovers)
+// ===========================================================
+
+vwapCrossUp   = ta.crossover (close, vwap_val)
+vwapCrossDown = ta.crossunder(close, vwap_val)
+
+vwapBuySig  = i_vwapSigOn and inNYFull and vwapCrossUp   and noPos
+vwapSellSig = i_vwapSigOn and inNYFull and vwapCrossDown and noPos
+
+var float vLongSL  = na
+var float vShortSL = na
+var float vLTP1    = na
+var float vLTP2    = na
+var float vSTP1    = na
+var float vSTP2    = na
+
+if vwapBuySig
+    vLongSL := low  - atr * i_vwapSLMult
+    float r  = close - vLongSL
+    vLTP1   := close + r * i_vwapTP1R
+    vLTP2   := close + r * i_vwapTP2R
+
+if vwapSellSig
+    vShortSL := high + atr * i_vwapSLMult
+    float r   = vShortSL - close
+    vSTP1    := close - r * i_vwapTP1R
+    vSTP2    := close - r * i_vwapTP2R
+
+// ===========================================================
 // STOP LOSS
 // ===========================================================
 
@@ -408,6 +447,57 @@ plotshape(buySignal,  location = location.belowbar, style = shape.triangleup,
      color = color.new(color.lime, 0), size = size.normal, title = "Buy Signal")
 plotshape(sellSignal, location = location.abovebar, style = shape.triangledown,
      color = color.new(color.red,  0), size = size.normal, title = "Sell Signal")
+
+// Full NY session background (separate from AM session shading)
+bgcolor(i_showNYFullBG and inNYFull ? color.new(color.teal, 95) : na, title = "Full NY Session BG")
+
+// VWAP cross signal markers (diamonds, distinct from main ISP triangles)
+plotshape(i_showVWAPSig and vwapBuySig,
+     location = location.belowbar, style = shape.diamond,
+     color    = color.new(color.blue,   0), size = size.normal, title = "VWAP Buy Signal")
+plotshape(i_showVWAPSig and vwapSellSig,
+     location = location.abovebar, style = shape.diamond,
+     color    = color.new(color.orange, 0), size = size.normal, title = "VWAP Sell Signal")
+
+// VWAP signal TP / SL levels
+if i_showVWAPSig
+    int vext = bar_index + 35
+    if vwapBuySig and not na(vLongSL)
+        float riskV = close - vLongSL
+        label.new(bar_index, low - atr * 1.4,
+             "VWAP BUY @ " + fmtP(close) + "\nSL " + fmtP(vLongSL) + " | Risk " + fmtP(riskV) + " pts",
+             color     = color.new(color.blue,   10),
+             textcolor = color.white,
+             style     = label.style_label_up,
+             size      = size.small,
+             xloc      = xloc.bar_index)
+        drawLevel(bar_index, vLongSL, vext,
+             color.new(color.red,  0), color.new(color.red,  10), color.white,
+             "VWAP SL  " + fmtP(vLongSL))
+        drawLevel(bar_index, vLTP1, vext,
+             color.new(color.aqua, 0), color.new(color.aqua, 10), color.black,
+             "VWAP TP1 " + fmtP(vLTP1) + " (" + str.tostring(i_vwapTP1R) + "R)")
+        drawLevel(bar_index, vLTP2, vext,
+             color.new(color.blue, 0), color.new(color.blue, 10), color.white,
+             "VWAP TP2 " + fmtP(vLTP2) + " (" + str.tostring(i_vwapTP2R) + "R)")
+    if vwapSellSig and not na(vShortSL)
+        float riskV = vShortSL - close
+        label.new(bar_index, high + atr * 1.4,
+             "VWAP SELL @ " + fmtP(close) + "\nSL " + fmtP(vShortSL) + " | Risk " + fmtP(riskV) + " pts",
+             color     = color.new(color.orange, 10),
+             textcolor = color.white,
+             style     = label.style_label_down,
+             size      = size.small,
+             xloc      = xloc.bar_index)
+        drawLevel(bar_index, vShortSL, vext,
+             color.new(color.red,    0), color.new(color.red,    10), color.white,
+             "VWAP SL  " + fmtP(vShortSL))
+        drawLevel(bar_index, vSTP1, vext,
+             color.new(color.aqua,   0), color.new(color.aqua,   10), color.black,
+             "VWAP TP1 " + fmtP(vSTP1) + " (" + str.tostring(i_vwapTP1R) + "R)")
+        drawLevel(bar_index, vSTP2, vext,
+             color.new(color.blue,   0), color.new(color.blue,   10), color.white,
+             "VWAP TP2 " + fmtP(vSTP2) + " (" + str.tostring(i_vwapTP2R) + "R)")
 
 // SL / TP lines + labels
 if i_showSLTP
@@ -577,3 +667,9 @@ alertcondition(trendDir ==  1 and trendDir[1] !=  1,
 alertcondition(trendDir == -1 and trendDir[1] != -1,
      title = "ISP Trend to Bear",
      message = "Trend flipped BEAR | {{ticker}}")
+alertcondition(vwapBuySig,
+     title   = "ISP VWAP Buy Signal",
+     message = "VWAP Cross Up | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(vwapSellSig,
+     title   = "ISP VWAP Sell Signal",
+     message = "VWAP Cross Down | {{ticker}} @ {{close}} | {{time}}")
