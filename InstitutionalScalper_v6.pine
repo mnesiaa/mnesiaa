@@ -1,7 +1,7 @@
 //@version=6
 strategy(
-     title             = "Institutional Scalper Pro v1.3",
-     shorttitle        = "ISP v1.3",
+     title             = "Institutional Scalper Pro v1.4",
+     shorttitle        = "ISP v1.4",
      overlay           = true,
      pyramiding        = 0,
      default_qty_type  = strategy.percent_of_equity,
@@ -336,6 +336,54 @@ if sellSignal and not na(shortSL)
     sRun := close - r * i_runR
 
 // ===========================================================
+// PROGRESSIVE STOP MANAGEMENT
+// Breakeven after TP1 hits, ATR trail active after TP2 hits.
+// longSL / shortSL are var-persisted so updates propagate to
+// the exit orders placed every bar below.
+// ===========================================================
+
+var float longEntry = na
+var float shortEntry = na
+var bool  longBE    = false
+var bool  shortBE   = false
+var bool  longTA    = false
+var bool  shortTA   = false
+
+if buySignal
+    longEntry := close
+    longBE    := false
+    longTA    := false
+
+if sellSignal
+    shortEntry := close
+    shortBE    := false
+    shortTA    := false
+
+// Breakeven: floor SL at entry price once TP1 is tagged
+if strategy.position_size > 0 and not longBE and not na(lTP1) and high >= lTP1
+    longSL := math.max(longSL, longEntry)
+    longBE := true
+
+if strategy.position_size < 0 and not shortBE and not na(sTP1) and low <= sTP1
+    shortSL := math.min(shortSL, shortEntry)
+    shortBE := true
+
+// ATR trail: once TP2 is tagged, trail SL by 2×ATR
+atrTrail = atr * 2.0
+
+if strategy.position_size > 0 and not longTA and not na(lTP2) and high >= lTP2
+    longTA := true
+
+if strategy.position_size < 0 and not shortTA and not na(sTP2) and low <= sTP2
+    shortTA := true
+
+if strategy.position_size > 0 and longTA
+    longSL := math.max(longSL, close - atrTrail)
+
+if strategy.position_size < 0 and shortTA
+    shortSL := math.min(shortSL, close + atrTrail)
+
+// ===========================================================
 // STRATEGY EXECUTION
 // ===========================================================
 
@@ -485,8 +533,13 @@ if i_showDash
          ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
          : "N/A"
 
+    bool  activeBE = (strategy.position_size > 0 and longBE) or (strategy.position_size < 0 and shortBE)
+    bool  activeTA = (strategy.position_size > 0 and longTA) or (strategy.position_size < 0 and shortTA)
+    string be = activeBE ? "YES" : "NO"
+    string tr = activeTA ? "YES" : "NO"
+
     string dashText =
-         "=== ISP v1.3 ===\n" +
+         "=== ISP v1.4 ===\n" +
          "Session : " + sv + "\n" +
          "Trend   : " + td + "\n" +
          "EMA     : " + em + "\n" +
@@ -496,6 +549,8 @@ if i_showDash
          "Sweep   : " + sw + "\n" +
          "----------------\n" +
          "Position: " + po + "\n" +
+         "Breakevn: " + be + "\n" +
+         "Trail   : " + tr + "\n" +
          "Win Rate: " + wr + "\n" +
          "Prof Fac: " + pf + "\n" +
          "Net PnL : $" + str.tostring(math.round(strategy.netprofit, 2))
