@@ -1,4 +1,4 @@
-# Institutional Scalper Pro v1.4 — Strategy Guide
+# Institutional Scalper Pro v1.5 — Strategy Guide
 
 ## Overview
 
@@ -8,9 +8,11 @@ ISP is a Pine Script v6 strategy+indicator that combines:
 - Fair Value Gaps
 - Displacement candles
 - CVD / delta proxy
-- VWAP + EMA alignment
-- RSI + ATR filters
-- NY AM session gating (09:30–11:30 EST)
+- VWAP + SD bands (±1 and ±2 standard deviation)
+- Session Volume Profile (POC, VAH, VAL)
+- EMA alignment
+- RSI, ATR, ADX filters
+- NY AM session gating (09:30–11:30 EST, last entry 11:15 EST)
 - Progressive stop management (breakeven → ATR trail)
 
 Signals require **all** filters to align simultaneously, making them rare
@@ -65,15 +67,52 @@ Estimates buy/sell volume from candle position:
 
 Rising CVD = net buy pressure over the session. Falling = net sell.
 
-### 6. Session Filter
+### 6. VWAP Standard Deviation Bands
 
-All signals gated to **09:30–11:30 EST** by default (integer HHMM comparison,
-works on all market data feeds). The session high/low are tracked from open.
+Computed alongside the session-anchored VWAP using volume-weighted variance:
 
-### 7. Signal Gate (ALL must be true)
+```
+SD = sqrt( E[P²] − E[P]² )   weighted by volume
+```
 
-**BUY**
-1. In active session
+- **±1 SD** — normal price distribution boundary (~68% of session volume)
+- **±2 SD** — exhaustion zone (~95% of session volume)
+
+Filter: long entries blocked when `close > VWAP+2SD`; shorts blocked when
+`close < VWAP-2SD`. Price this far from VWAP tends to revert rather than extend.
+
+Dashboard shows the current band position: `ABOVE +2SD`, `ABOVE +1SD`,
+`ABOVE`, `BELOW`, `BELOW -1SD`, `BELOW -2SD`.
+
+### 7. Session Volume Profile
+
+Fixed-grid VP anchored at session open ± 3×ATR, divided into `i_vpBins`
+buckets (default 24). Bar volume is distributed pro-rata across the buckets
+the bar's high-low range covers.
+
+Outputs recalculate live every bar:
+- **POC** (Point of Control) — bucket with highest accumulated volume; drawn
+  in yellow on the chart
+- **VAH / VAL** (Value Area High / Low) — tightest range around POC that
+  contains 70% of session volume; drawn in grey
+
+**POC Proximity Filter**: if the POC sits within 1×ATR above the entry for
+longs (or below for shorts), the signal is skipped — the POC will act as a
+magnetic S/R level directly in the path of the trade.
+
+### 8. Session Filter
+
+All signals gated to **09:30–11:15 EST** for new entries (last-entry cutoff
+at `i_sesEntryEnd`, default 1115). The session itself runs until `i_sesEnd`
+(default 1130) for tracking session high/low and background shading.
+
+Dashboard shows `ACTIVE` (entries allowed), `WIND-DOWN` (session on but no
+new entries), or `OFF`.
+
+### 9. Signal Gate (ALL must be true)
+
+**BUY** (all must be true)
+1. Within entry window (09:30–11:15 EST)
 2. Recent bull liquidity sweep (≤ `sweepWin` bars ago)
 3. Trend direction ≥ 0 OR EMA 9 > EMA 20
 4. EMA 9 > EMA 20
@@ -84,6 +123,10 @@ works on all market data feeds). The session high/low are tracked from open.
 9. Delta positive OR CVD rising
 10. Range > 0.35× ATR and volume > 0.75× average (chop filter)
 11. No open position
+12. ADX ≥ `adxMin` (default 20) — trending, not ranging
+13. Close < VWAP+2SD — not overextended upside
+14. VP POC not within 1×ATR above entry — no overhead volume magnet
+15. SL distance ≥ `minRisk` × ATR — stop is meaningful
 
 **SELL** = mirror image of the above.
 
@@ -213,10 +256,11 @@ look-ahead bias in the alerts.
 
 ## Changelog
 
-| Version | Date       | Notes                                                      |
-|---------|------------|------------------------------------------------------------|
-| 1.0     | 2026-05-22 | Initial release                                            |
-| 1.1     | 2026-05-22 | Two-phase sweep+confirmation architecture                  |
-| 1.2     | 2026-05-22 | Labeled SL/TP lines on every signal                        |
-| 1.3     | 2026-05-22 | Replace pivot-wait structure with zero-lag rolling highs   |
-| 1.4     | 2026-05-24 | Progressive SL: breakeven after TP1, ATR trail after TP2  |
+| Version | Date       | Notes                                                         |
+|---------|------------|---------------------------------------------------------------|
+| 1.0     | 2026-05-22 | Initial release                                               |
+| 1.1     | 2026-05-22 | Two-phase sweep+confirmation architecture                     |
+| 1.2     | 2026-05-22 | Labeled SL/TP lines on every signal                           |
+| 1.3     | 2026-05-22 | Replace pivot-wait structure with zero-lag rolling highs      |
+| 1.4     | 2026-05-24 | Progressive SL: breakeven after TP1, ATR trail after TP2     |
+| 1.5     | 2026-05-24 | VWAP SD bands, session volume profile (POC/VAH/VAL), ADX filter, min-risk filter, POC proximity filter, VWAP exhaustion filter, session entry cutoff |

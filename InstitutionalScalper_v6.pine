@@ -1,7 +1,7 @@
 //@version=6
 strategy(
-     title             = "Institutional Scalper Pro v1.4",
-     shorttitle        = "ISP v1.4",
+     title             = "Institutional Scalper Pro v1.5",
+     shorttitle        = "ISP v1.5",
      overlay           = true,
      pyramiding        = 0,
      default_qty_type  = strategy.percent_of_equity,
@@ -14,7 +14,7 @@ strategy(
      process_orders_on_close = true)
 
 // ===========================================================
-// HELPER FUNCTIONS  (global scope required by Pine Script)
+// HELPER FUNCTIONS
 // ===========================================================
 
 fmtP(float v) =>
@@ -36,10 +36,11 @@ drawLevel(int x0, float price, int ext, color lineCol, color bgCol, color txtCol
 // INPUTS
 // ===========================================================
 
-i_useSession = input.bool(true,   "Enable NY AM Session Filter",    group = "Session")
-i_showSessBG = input.bool(true,   "Shade Session Background",       group = "Session")
-i_sesStart   = input.int(930,     "Session Start HHMM EST",         group = "Session")
-i_sesEnd     = input.int(1130,    "Session End HHMM EST",           group = "Session")
+i_useSession  = input.bool(true,   "Enable NY AM Session Filter",  group = "Session")
+i_showSessBG  = input.bool(true,   "Shade Session Background",     group = "Session")
+i_sesStart    = input.int(930,     "Session Start HHMM EST",       group = "Session")
+i_sesEnd      = input.int(1130,    "Session End HHMM EST",         group = "Session")
+i_sesEntryEnd = input.int(1115,    "Last Entry HHMM EST",          group = "Session")
 
 i_nearLen    = input.int(15,  "Near Structure Lookback",  minval = 5,  maxval = 60,  group = "Structure")
 i_farLen     = input.int(40,  "Far Structure Lookback",   minval = 10, maxval = 200, group = "Structure")
@@ -61,6 +62,19 @@ i_rsiBearMax = input.int(55,   "RSI Max for Shorts",  minval = 35, maxval = 70, 
 i_atrLen     = input.int(14,   "ATR Length",          minval = 2,  group = "Indicators")
 i_atrMult    = input.float(0.5,"ATR Stop Buffer mult",minval = 0.1, step = 0.1, group = "Indicators")
 i_displLen   = input.int(3,    "Displacement Window", minval = 1,  maxval = 6,  group = "Indicators")
+
+i_vwapBandFilt  = input.bool(true,  "VWAP Band Exhaustion Filter", group = "VWAP")
+i_showVWAPBands = input.bool(true,  "Show VWAP SD Bands",          group = "VWAP")
+
+i_vpOn      = input.bool(true,  "Enable Volume Profile",  group = "Volume Profile")
+i_vpBins    = input.int(24,     "VP Bins",       minval = 10, maxval = 48, group = "Volume Profile")
+i_vpPOCFilt = input.bool(true,  "POC Proximity Filter",   group = "Volume Profile")
+i_showVP    = input.bool(true,  "Show POC / VAH / VAL",   group = "Volume Profile")
+
+i_adxOn     = input.bool(true,  "ADX Trend Strength Filter", group = "Filters")
+i_adxLen    = input.int(14,     "ADX Length",   minval = 5,  group = "Filters")
+i_adxMin    = input.float(20.0, "ADX Minimum",  minval = 10, step = 5, group = "Filters")
+i_minRisk   = input.float(0.25, "Min Risk (ATR mult)", minval = 0.05, step = 0.05, group = "Filters")
 
 i_tp1R   = input.float(1.0,  "TP1 R",          minval = 0.5, step = 0.25, group = "Take Profit")
 i_tp2R   = input.float(2.0,  "TP2 R",          minval = 1.0, step = 0.25, group = "Take Profit")
@@ -90,19 +104,21 @@ emaM = ta.ema(close, i_emaMid)
 emaS = ta.ema(close, i_emaSlow)
 rsi  = ta.rsi(close, i_rsiLen)
 
-// Session-anchored VWAP (resets on each new daily/session open)
 vwap_val = ta.vwap(hlc3)
 
 avgVol   = ta.sma(volume, i_volLen)
 relVol   = volume / avgVol
 volSpike = relVol >= i_volThresh
 
+[diPlus, diMinus, adxVal] = ta.dmi(i_adxLen, i_adxLen)
+
 // ===========================================================
-// SESSION FILTER  (integer HHMM comparison, works on all markets)
+// SESSION FILTER
 // ===========================================================
 
-barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
-inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+barHHMM    = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+inSession  = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+inEntryWin = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEntryEnd)
 
 var float sessionHigh = na
 var float sessionLow  = na
@@ -119,10 +135,94 @@ else if inSession
     sessionLow  := math.min(sessionLow,  low)
 
 // ===========================================================
+// VWAP STANDARD DEVIATION BANDS  (session-anchored, manual)
+// Variance formula: Var = E[P²] - E[P]²  weighted by volume
+// ===========================================================
+
+var float _vPV   = 0.0
+var float _vPV2  = 0.0
+var float _vVol  = 0.0
+
+if sessOpened
+    _vPV  := 0.0
+    _vPV2 := 0.0
+    _vVol := 0.0
+
+if inSession
+    _vPV  := _vPV  + hlc3 * volume
+    _vPV2 := _vPV2 + hlc3 * hlc3 * volume
+    _vVol := _vVol + volume
+
+vwapSD = _vVol > 0 ? math.sqrt(math.max(_vPV2 / _vVol - vwap_val * vwap_val, 0.0)) : 0.0
+vwapU1 = vwap_val + 1.0 * vwapSD
+vwapU2 = vwap_val + 2.0 * vwapSD
+vwapD1 = vwap_val - 1.0 * vwapSD
+vwapD2 = vwap_val - 2.0 * vwapSD
+
+// ===========================================================
+// SESSION VOLUME PROFILE  (fixed grid anchored at session open)
+// Grid = open ± 3×ATR divided into i_vpBins buckets.
+// Outputs: vpPOC (highest-volume node), vpVAH / vpVAL (70% value area).
+// ===========================================================
+
+var float[] _vpArr = array.new_float(50, 0.0)
+var float   _vpBase = na
+var float   _vpBinZ = na
+var float   vpPOC   = na
+var float   vpVAH   = na
+var float   vpVAL   = na
+
+if sessOpened
+    array.fill(_vpArr, 0.0)
+    _vpBase := open - 3.0 * atr
+    _vpBinZ := 6.0 * atr / i_vpBins
+    vpPOC   := na
+    vpVAH   := na
+    vpVAL   := na
+
+if i_vpOn and inSession and _vpBinZ > 0
+    int bLo = math.max(0, math.min(i_vpBins - 1, math.floor((low  - _vpBase) / _vpBinZ)))
+    int bHi = math.max(0, math.min(i_vpBins - 1, math.floor((high - _vpBase) / _vpBinZ)))
+    float vpb = volume / math.max(bHi - bLo + 1, 1)
+    for i = bLo to bHi
+        array.set(_vpArr, i, array.get(_vpArr, i) + vpb)
+
+    int   pocIdx = 0
+    float maxV   = 0.0
+    float totV   = 0.0
+    for i = 0 to i_vpBins - 1
+        float v = array.get(_vpArr, i)
+        totV += v
+        if v > maxV
+            maxV   := v
+            pocIdx := i
+
+    vpPOC := _vpBase + (pocIdx + 0.5) * _vpBinZ
+
+    float vaBuilt  = maxV
+    int   vaLo     = pocIdx
+    int   vaHi     = pocIdx
+    float vaTarget = totV * 0.70
+
+    for _ = 0 to i_vpBins
+        if vaBuilt >= vaTarget
+            break
+        float addHi = vaHi < i_vpBins - 1 ? array.get(_vpArr, vaHi + 1) : 0.0
+        float addLo = vaLo > 0             ? array.get(_vpArr, vaLo - 1) : 0.0
+        if addHi >= addLo and vaHi < i_vpBins - 1
+            vaHi    += 1
+            vaBuilt += addHi
+        else if vaLo > 0
+            vaLo    -= 1
+            vaBuilt += addLo
+        else
+            break
+
+    vpVAH := _vpBase + (vaHi + 1) * _vpBinZ
+    vpVAL := _vpBase +  vaLo      * _vpBinZ
+
+// ===========================================================
 // ZERO-LAG ROLLING STRUCTURE
-// [1] offset = based on already-closed bars = non-repainting
-// Signal fires the same bar price crosses — no pivot wait
-// Near = recent sweep targets   Far = BOS / macro trend
 // ===========================================================
 
 nearHigh = ta.highest(high, i_nearLen)[1]
@@ -130,7 +230,6 @@ nearLow  = ta.lowest (low,  i_nearLen)[1]
 farHigh  = ta.highest(high, i_farLen) [1]
 farLow   = ta.lowest (low,  i_farLen) [1]
 
-// BOS / CHoCH
 var int  trendDir  = 0
 var bool bullBOS   = false
 var bool bearBOS   = false
@@ -159,7 +258,6 @@ if crossBelowFar
         bearCHoCH := true
     trendDir := -1
 
-// Liquidity Sweep — wick pierces near structure, close reclaims
 bullSweep_bar = low  < nearLow  and close > nearLow
 bearSweep_bar = high > nearHigh and close < nearHigh
 
@@ -175,7 +273,7 @@ recentBullSweep = ta.barssince(bullSweep_bar) <= i_sweepWin
 recentBearSweep = ta.barssince(bearSweep_bar) <= i_sweepWin
 
 // ===========================================================
-// FAIR VALUE GAP  (3-candle imbalance)
+// FAIR VALUE GAP
 // ===========================================================
 
 minFVG      = atr * i_fvgMinATR
@@ -210,7 +308,7 @@ recentBullFVG = ta.barssince(bullFVG_bar) <= i_fvgWin
 recentBearFVG = ta.barssince(bearFVG_bar) <= i_fvgWin
 
 // ===========================================================
-// DISPLACEMENT CANDLE  (zero lag, per-bar)
+// DISPLACEMENT CANDLE
 // ===========================================================
 
 body   = math.abs(close - open)
@@ -223,7 +321,7 @@ recentBullDisp = ta.barssince(bullDisp_bar) <= i_displLen
 recentBearDisp = ta.barssince(bearDisp_bar) <= i_displLen
 
 // ===========================================================
-// DELTA / CVD  (zero lag)
+// DELTA / CVD
 // ===========================================================
 
 buyEst  = volume * math.max(close - low,   0.0) / math.max(range_, 1e-9)
@@ -252,11 +350,35 @@ atrOk    = (high - low) > atr * 0.35
 volOk    = volume > avgVol * 0.75
 
 // ===========================================================
+// ADDITIONAL FILTERS
+// ===========================================================
+
+// ADX: require trending conditions before entry
+c_adx = not i_adxOn or adxVal >= i_adxMin
+
+// VWAP band exhaustion: skip entries when price is beyond ±2SD
+// (overextended moves are more likely to mean-revert than extend)
+c_vwapBand_L = not i_vwapBandFilt or close < vwapU2
+c_vwapBand_S = not i_vwapBandFilt or close > vwapD2
+
+// Minimum risk: SL must be at least i_minRisk × ATR from entry
+// Computed from candidate SL before signal is finalized
+atrBuf      = atr * i_atrMult
+candLongSL  = math.min(nz(lastBullSweepLow, nearLow), low)  - atrBuf
+candShortSL = math.max(nz(lastBearSweepHigh, nearHigh), high) + atrBuf
+c_minRisk_L = (close - candLongSL)  >= atr * i_minRisk
+c_minRisk_S = (candShortSL - close) >= atr * i_minRisk
+
+// POC proximity: skip if POC sits within 1 ATR in the direction of travel
+// (POC acts as a volume magnet — too-close overhead POC resists longs)
+c_vp_L = not (i_vpOn and i_vpPOCFilt) or na(vpPOC) or vpPOC <= close or vpPOC > close + atr
+c_vp_S = not (i_vpOn and i_vpPOCFilt) or na(vpPOC) or vpPOC >= close or vpPOC < close - atr
+
+// ===========================================================
 // SIGNAL CONDITIONS
 // ===========================================================
 
-// Long
-c_ses_L     = inSession
+c_ses_L     = inEntryWin
 c_sweep_L   = recentBullSweep
 c_trend_L   = trendDir >= 0 or emaBull
 c_ema_L     = emaBull
@@ -271,8 +393,7 @@ buyCondition = c_ses_L and c_sweep_L and c_trend_L and c_ema_L
      and c_vwap_L and c_impulse_L and c_vol_L and c_rsi_L
      and c_delta_L and c_noise_L
 
-// Short
-c_ses_S     = inSession
+c_ses_S     = inEntryWin
 c_sweep_S   = recentBearSweep
 c_trend_S   = trendDir <= 0 or emaBear
 c_ema_S     = emaBear
@@ -288,25 +409,21 @@ sellCondition = c_ses_S and c_sweep_S and c_trend_S and c_ema_S
      and c_delta_S and c_noise_S
 
 noPos      = strategy.position_size == 0
-buySignal  = buyCondition  and noPos
-sellSignal = sellCondition and noPos
+buySignal  = buyCondition  and noPos and c_adx and c_vwapBand_L and c_vp_L and c_minRisk_L
+sellSignal = sellCondition and noPos and c_adx and c_vwapBand_S and c_vp_S and c_minRisk_S
 
 // ===========================================================
 // STOP LOSS
 // ===========================================================
 
-atrBuf = atr * i_atrMult
-
 var float longSL  = na
 var float shortSL = na
 
 if buySignal
-    float ref = nz(lastBullSweepLow, nearLow)
-    longSL   := math.min(ref, low) - atrBuf
+    longSL := candLongSL
 
 if sellSignal
-    float ref = nz(lastBearSweepHigh, nearHigh)
-    shortSL  := math.max(ref, high) + atrBuf
+    shortSL := candShortSL
 
 // ===========================================================
 // TAKE PROFIT
@@ -337,17 +454,17 @@ if sellSignal and not na(shortSL)
 
 // ===========================================================
 // PROGRESSIVE STOP MANAGEMENT
-// Breakeven after TP1 hits, ATR trail active after TP2 hits.
-// longSL / shortSL are var-persisted so updates propagate to
-// the exit orders placed every bar below.
+// Breakeven after TP1 tags, ATR trail after TP2 tags.
+// longSL / shortSL are var-persisted so updates flow into
+// the strategy.exit calls placed every bar below.
 // ===========================================================
 
-var float longEntry = na
+var float longEntry  = na
 var float shortEntry = na
-var bool  longBE    = false
-var bool  shortBE   = false
-var bool  longTA    = false
-var bool  shortTA   = false
+var bool  longBE     = false
+var bool  shortBE    = false
+var bool  longTA     = false
+var bool  shortTA    = false
 
 if buySignal
     longEntry := close
@@ -359,7 +476,6 @@ if sellSignal
     shortBE    := false
     shortTA    := false
 
-// Breakeven: floor SL at entry price once TP1 is tagged
 if strategy.position_size > 0 and not longBE and not na(lTP1) and high >= lTP1
     longSL := math.max(longSL, longEntry)
     longBE := true
@@ -368,7 +484,6 @@ if strategy.position_size < 0 and not shortBE and not na(sTP1) and low <= sTP1
     shortSL := math.min(shortSL, shortEntry)
     shortBE := true
 
-// ATR trail: once TP2 is tagged, trail SL by 2×ATR
 atrTrail = atr * 2.0
 
 if strategy.position_size > 0 and not longTA and not na(lTP2) and high >= lTP2
@@ -397,13 +512,13 @@ if strategy.position_size > 0 and not na(longSL)
     strategy.exit("L-TP1", "Long",  qty_percent = i_tp1pct, limit = lTP1, stop = longSL,  comment = "TP1")
     strategy.exit("L-TP2", "Long",  qty_percent = i_tp2pct, limit = lTP2, stop = longSL,  comment = "TP2")
     strategy.exit("L-TP3", "Long",  qty_percent = i_tp3pct, limit = lTP3, stop = longSL,  comment = "TP3")
-    strategy.exit("L-Run", "Long",  qty_percent = 100,      limit = lRun,  stop = longSL,  comment = "Runner")
+    strategy.exit("L-Run", "Long",  qty_percent = 100,       limit = lRun, stop = longSL,  comment = "Runner")
 
 if strategy.position_size < 0 and not na(shortSL)
     strategy.exit("S-TP1", "Short", qty_percent = i_tp1pct, limit = sTP1, stop = shortSL, comment = "TP1")
     strategy.exit("S-TP2", "Short", qty_percent = i_tp2pct, limit = sTP2, stop = shortSL, comment = "TP2")
     strategy.exit("S-TP3", "Short", qty_percent = i_tp3pct, limit = sTP3, stop = shortSL, comment = "TP3")
-    strategy.exit("S-Run", "Short", qty_percent = 100,      limit = sRun,  stop = shortSL, comment = "Runner")
+    strategy.exit("S-Run", "Short", qty_percent = 100,       limit = sRun, stop = shortSL, comment = "Runner")
 
 // ===========================================================
 // VISUAL
@@ -415,6 +530,24 @@ plot(i_showEMAs ? emaF : na, "EMA Fast", color = color.new(color.yellow, 0), lin
 plot(i_showEMAs ? emaM : na, "EMA Mid",  color = color.new(color.orange, 0), linewidth = 1)
 plot(i_showEMAs ? emaS : na, "EMA Slow", color = color.new(color.red,    0), linewidth = 2)
 plot(i_showVWAP ? vwap_val : na, "VWAP", color = color.new(color.purple, 0), linewidth = 2)
+
+// VWAP SD bands — lighter shade further from VWAP
+plot(i_showVWAPBands and inSession ? vwapU1 : na, "VWAP +1SD",
+     color = color.new(color.purple, 65), linewidth = 1)
+plot(i_showVWAPBands and inSession ? vwapU2 : na, "VWAP +2SD",
+     color = color.new(color.purple, 40), linewidth = 1)
+plot(i_showVWAPBands and inSession ? vwapD1 : na, "VWAP -1SD",
+     color = color.new(color.purple, 65), linewidth = 1)
+plot(i_showVWAPBands and inSession ? vwapD2 : na, "VWAP -2SD",
+     color = color.new(color.purple, 40), linewidth = 1)
+
+// Volume Profile levels (step-line tracks live VP as session fills)
+plot(i_showVP and i_vpOn and inSession ? vpPOC : na, "VP POC",
+     color = color.new(color.yellow, 0), linewidth = 2, style = plot.style_stepline)
+plot(i_showVP and i_vpOn and inSession ? vpVAH : na, "VP VAH",
+     color = color.new(color.gray,  30), linewidth = 1, style = plot.style_stepline)
+plot(i_showVP and i_vpOn and inSession ? vpVAL : na, "VP VAL",
+     color = color.new(color.gray,  30), linewidth = 1, style = plot.style_stepline)
 
 plot(i_showSesHL and inSession ? sessionHigh : na, "Sess H",
      color = color.new(color.teal,   0), style = plot.style_stepline, linewidth = 1)
@@ -517,13 +650,17 @@ if i_showSLTP
 
 if i_showDash
     string td = trendDir == 1 ? "BULL" : trendDir == -1 ? "BEAR" : "NEUT"
-    string sv = inSession ? "ACTIVE" : "OFF"
+    string sv = inEntryWin ? "ACTIVE" : inSession ? "WIND-DOWN" : "OFF"
     string vl = volSpike  ? "SPIKE"  : relVol > 1.0 ? "NORM" : "LOW"
-    string vw = vwapBull  ? "ABOVE"  : "BELOW"
+    string vw = close > vwapU2 ? "ABOVE +2SD" : close > vwapU1 ? "ABOVE +1SD" :
+                close > vwap_val ? "ABOVE" : close > vwapD1 ? "BELOW" :
+                close > vwapD2 ? "BELOW -1SD" : "BELOW -2SD"
     string em = emaBull   ? "BULL"   : "BEAR"
     string sw = recentBullSweep ? "BULL SWEEP" : recentBearSweep ? "BEAR SWEEP" : "none"
     string po = strategy.position_size > 0 ? "LONG"  :
                 strategy.position_size < 0 ? "SHORT" : "FLAT"
+    string dx = str.tostring(math.round(adxVal, 1)) + (adxVal >= i_adxMin ? " OK" : " LOW")
+    string pc = not na(vpPOC) ? fmtP(vpPOC) : "n/a"
 
     int    tot = strategy.wintrades + strategy.losstrades
     string wr  = tot > 0
@@ -533,20 +670,22 @@ if i_showDash
          ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
          : "N/A"
 
-    bool  activeBE = (strategy.position_size > 0 and longBE) or (strategy.position_size < 0 and shortBE)
-    bool  activeTA = (strategy.position_size > 0 and longTA) or (strategy.position_size < 0 and shortTA)
+    bool   activeBE = (strategy.position_size > 0 and longBE) or (strategy.position_size < 0 and shortBE)
+    bool   activeTA = (strategy.position_size > 0 and longTA) or (strategy.position_size < 0 and shortTA)
     string be = activeBE ? "YES" : "NO"
     string tr = activeTA ? "YES" : "NO"
 
     string dashText =
-         "=== ISP v1.4 ===\n" +
+         "=== ISP v1.5 ===\n" +
          "Session : " + sv + "\n" +
          "Trend   : " + td + "\n" +
          "EMA     : " + em + "\n" +
          "VWAP    : " + vw + "\n" +
+         "ADX     : " + dx + "\n" +
          "Volume  : " + vl + " (" + str.tostring(math.round(relVol, 2)) + "x)\n" +
          "RSI     : " + str.tostring(math.round(rsi, 1)) + "\n" +
          "Sweep   : " + sw + "\n" +
+         "VP POC  : " + pc + "\n" +
          "----------------\n" +
          "Position: " + po + "\n" +
          "Breakevn: " + be + "\n" +
@@ -567,33 +706,41 @@ if i_showDash
          bgcolor    = color.new(color.black, 15))
 
 // ===========================================================
-// CONDITION DEBUG TABLE  (enable in Visual settings)
+// CONDITION DEBUG TABLE
 // ===========================================================
 
 if i_showDebug
     string dbg =
          "-- LONG CONDITIONS --\n" +
-         fmtOk(c_ses_L)     + " Session\n" +
-         fmtOk(c_sweep_L)   + " Bull Sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + "b ago)\n" +
-         fmtOk(c_trend_L)   + " Trend dir=" + str.tostring(trendDir) + "\n" +
-         fmtOk(c_ema_L)     + " EMA Fast > Mid\n" +
-         fmtOk(c_vwap_L)    + " Above VWAP\n" +
-         fmtOk(c_impulse_L) + " Displacement or FVG\n" +
-         fmtOk(c_vol_L)     + " Volume " + str.tostring(math.round(relVol, 2)) + "x\n" +
-         fmtOk(c_rsi_L)     + " RSI " + str.tostring(math.round(rsi, 1)) + "\n" +
-         fmtOk(c_delta_L)   + " Delta positive\n" +
-         fmtOk(c_noise_L)   + " Range and vol OK\n" +
+         fmtOk(c_ses_L)      + " Session/Entry win\n" +
+         fmtOk(c_sweep_L)    + " Bull Sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + "b ago)\n" +
+         fmtOk(c_trend_L)    + " Trend dir=" + str.tostring(trendDir) + "\n" +
+         fmtOk(c_ema_L)      + " EMA Fast > Mid\n" +
+         fmtOk(c_vwap_L)     + " Above VWAP\n" +
+         fmtOk(c_impulse_L)  + " Displacement or FVG\n" +
+         fmtOk(c_vol_L)      + " Volume " + str.tostring(math.round(relVol, 2)) + "x\n" +
+         fmtOk(c_rsi_L)      + " RSI " + str.tostring(math.round(rsi, 1)) + "\n" +
+         fmtOk(c_delta_L)    + " Delta positive\n" +
+         fmtOk(c_noise_L)    + " Range and vol OK\n" +
+         fmtOk(c_adx)        + " ADX " + str.tostring(math.round(adxVal, 1)) + "\n" +
+         fmtOk(c_vwapBand_L) + " VWAP band OK\n" +
+         fmtOk(c_vp_L)       + " VP POC OK\n" +
+         fmtOk(c_minRisk_L)  + " Min risk OK\n" +
          "-- SHORT CONDITIONS --\n" +
-         fmtOk(c_ses_S)     + " Session\n" +
-         fmtOk(c_sweep_S)   + " Bear Sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + "b ago)\n" +
-         fmtOk(c_trend_S)   + " Trend\n" +
-         fmtOk(c_ema_S)     + " EMA Fast < Mid\n" +
-         fmtOk(c_vwap_S)    + " Below VWAP\n" +
-         fmtOk(c_impulse_S) + " Displacement or FVG\n" +
-         fmtOk(c_vol_S)     + " Volume\n" +
-         fmtOk(c_rsi_S)     + " RSI\n" +
-         fmtOk(c_delta_S)   + " Delta negative\n" +
-         fmtOk(c_noise_S)   + " Range and vol OK"
+         fmtOk(c_ses_S)      + " Session/Entry win\n" +
+         fmtOk(c_sweep_S)    + " Bear Sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + "b ago)\n" +
+         fmtOk(c_trend_S)    + " Trend\n" +
+         fmtOk(c_ema_S)      + " EMA Fast < Mid\n" +
+         fmtOk(c_vwap_S)     + " Below VWAP\n" +
+         fmtOk(c_impulse_S)  + " Displacement or FVG\n" +
+         fmtOk(c_vol_S)      + " Volume\n" +
+         fmtOk(c_rsi_S)      + " RSI\n" +
+         fmtOk(c_delta_S)    + " Delta negative\n" +
+         fmtOk(c_noise_S)    + " Range and vol OK\n" +
+         fmtOk(c_adx)        + " ADX\n" +
+         fmtOk(c_vwapBand_S) + " VWAP band OK\n" +
+         fmtOk(c_vp_S)       + " VP POC OK\n" +
+         fmtOk(c_minRisk_S)  + " Min risk OK"
 
     var table tbl = table.new(position.bottom_left, 1, 1,
          bgcolor      = color.new(color.black, 10),
