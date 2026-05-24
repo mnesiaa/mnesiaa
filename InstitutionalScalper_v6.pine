@@ -25,7 +25,7 @@ fmtP(float v) =>
 fmtOk(bool b) =>
     b ? "[Y]" : "[N]"
 
-drawLevel(int x0, float price, int ext, color lnCol, color bgCol, color txCol, string txt) =>
+drawLevel(x0, price, ext, lnCol, bgCol, txCol, txt) =>
     line.new(x0, price, ext, price, color = lnCol, style = line.style_dashed, width = 1)
     label.new(ext, price, txt,
          color     = bgCol,
