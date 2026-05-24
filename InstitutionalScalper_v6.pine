@@ -412,9 +412,9 @@ c_rsi_L     = rsiBull
 c_delta_L   = deltaPos or cvdUp
 c_noise_L   = atrOk and volOk
 
-buyCondition = c_ses_L and c_sweep_L and c_trend_L and c_ema_L
-     and c_vwap_L and c_impulse_L and c_vol_L and c_rsi_L
-     and c_delta_L and c_noise_L
+buyCondition = c_ses_L and c_sweep_L and c_trend_L and c_ema_L and
+     c_vwap_L and c_impulse_L and c_vol_L and c_rsi_L and
+     c_delta_L and c_noise_L
 
 // ── Short ──
 c_ses_S     = inEntryWin
@@ -428,9 +428,9 @@ c_rsi_S     = rsiBear
 c_delta_S   = deltaNeg or cvdDown
 c_noise_S   = atrOk and volOk
 
-sellCondition = c_ses_S and c_sweep_S and c_trend_S and c_ema_S
-     and c_vwap_S and c_impulse_S and c_vol_S and c_rsi_S
-     and c_delta_S and c_noise_S
+sellCondition = c_ses_S and c_sweep_S and c_trend_S and c_ema_S and
+     c_vwap_S and c_impulse_S and c_vol_S and c_rsi_S and
+     c_delta_S and c_noise_S
 
 noPos      = strategy.position_size == 0
 buySignal  = buyCondition  and noPos and c_adx and c_vwapBand_L and c_vp_L and c_minRisk_L
@@ -640,9 +640,11 @@ if i_showDash
     string td = trendDir == 1 ? "BULL" : trendDir == -1 ? "BEAR" : "NEUT"
     string sv = inEntryWin ? "ACTIVE" : inSession ? "WIND-DOWN" : "OFF"
     string vl = volSpike ? "SPIKE" : relVol > 1.0 ? "NORM" : "LOW"
-    string vw = close > vwapU2 ? "ABOVE +2SD" : close > vwapU1 ? "ABOVE +1SD" :
-                close > vwap_val ? "ABOVE" : close > vwapD1 ? "BELOW" :
-                close > vwapD2 ? "BELOW -1SD" : "BELOW -2SD"
+    string vw = close > vwapU2   ? "ABOVE +2SD" :
+                close > vwapU1   ? "ABOVE +1SD" :
+                close > vwap_val ? "ABOVE"       :
+                close > vwapD1   ? "BELOW"       :
+                close > vwapD2   ? "BELOW -1SD"  : "BELOW -2SD"
     string em = emaBull ? "BULL" : "BEAR"
     string sw = recentBullSweep ? "BULL SWEEP" : recentBearSweep ? "BEAR SWEEP" : "none"
     string po = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
