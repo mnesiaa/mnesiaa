@@ -315,8 +315,8 @@ if entry_long
     entry_p := close
     sl_p    := last_sl - atr14 * i_sl_buf
 
-    float risk  = entry_p - sl_p
-    tp1_p       := entry_p + risk * i_tp1_r
+    risk  = entry_p - sl_p
+    tp1_p := entry_p + risk * i_tp1_r
     // TP2: take the GREATER of 2R and the VAH level so we always aim for the
     // opposite side of the value area — a key AMT profit target.
     tp2_p       := not na(vah) ? math.max(entry_p + risk * i_tp2_r, vah) : entry_p + risk * i_tp2_r
@@ -347,7 +347,7 @@ if entry_short
     entry_p := close
     sl_p    := last_sh + atr14 * i_sl_buf
 
-    float risk  = sl_p - entry_p
+    risk  = sl_p - entry_p
     tp1_p       := entry_p - risk * i_tp1_r
     // TP2: take the LESSER of 2R and the VAL level
     tp2_p       := not na(val) ? math.min(entry_p - risk * i_tp2_r, val) : entry_p - risk * i_tp2_r
@@ -546,40 +546,40 @@ if barstate.islast
                text_size  = size.tiny)
 
     // ── Session Status ──────────────────────────────────────────────────────
-    string s_sess = in_session ? "● ACTIVE" : "○ INACTIVE"
-    color  c_sess = in_session ? color.lime  : color.gray
+    s_sess = in_session ? "● ACTIVE" : "○ INACTIVE"
+    c_sess = in_session ? color.lime  : color.gray
     table.cell(dash, 0, 1, "SESSION",
                text_color = color.silver, text_size = size.tiny)
     table.cell(dash, 1, 1, s_sess,
                text_color = c_sess,       text_size = size.small)
 
     // ── Daily Bias ──────────────────────────────────────────────────────────
-    string s_bias = sess_bias == 1 ? "▲ BULLISH" : sess_bias == -1 ? "▼ BEARISH" : "─ NEUTRAL"
-    color  c_bias = sess_bias == 1 ? color.lime   : sess_bias == -1 ? color.red   : color.gray
+    s_bias = sess_bias == 1 ? "▲ BULLISH" : sess_bias == -1 ? "▼ BEARISH" : "─ NEUTRAL"
+    c_bias = sess_bias == 1 ? color.lime   : sess_bias == -1 ? color.red   : color.gray
     table.cell(dash, 0, 2, "BIAS",
                text_color = color.silver, text_size = size.tiny)
     table.cell(dash, 1, 2, s_bias,
                text_color = c_bias,       text_size = size.small)
 
     // ── Session POC ─────────────────────────────────────────────────────────
-    string s_poc = not na(poc) ? str.tostring(poc, format.mintick) : "---"
+    s_poc = not na(poc) ? str.tostring(poc, format.mintick) : "---"
     table.cell(dash, 0, 3, "POC",
                text_color = color.silver,  text_size = size.tiny)
     table.cell(dash, 1, 3, s_poc,
                text_color = color.yellow,  text_size = size.small)
 
     // ── VAH / VAL ───────────────────────────────────────────────────────────
-    string s_vah = not na(vah) ? str.tostring(vah, format.mintick) : "---"
-    string s_val = not na(val) ? str.tostring(val, format.mintick) : "---"
+    s_vah = not na(vah) ? str.tostring(vah, format.mintick) : "---"
+    s_val = not na(val) ? str.tostring(val, format.mintick) : "---"
     table.cell(dash, 0, 4, "VAH / VAL",
                text_color = color.silver,  text_size = size.tiny)
     table.cell(dash, 1, 4, s_vah + " / " + s_val,
                text_color = color.new(color.green, 10), text_size = size.tiny)
 
     // ── Open Position ───────────────────────────────────────────────────────
-    float  ps    = strategy.position_size
-    string s_pos = ps > 0 ? "▲ LONG  " + str.tostring(ps, "#.##") : ps < 0 ? "▼ SHORT " + str.tostring(math.abs(ps), "#.##") : "  FLAT"
-    color  c_pos = ps > 0 ? color.lime : ps < 0 ? color.red : color.gray
+    ps    = strategy.position_size
+    s_pos = ps > 0 ? "▲ LONG  " + str.tostring(ps, "#.##") : ps < 0 ? "▼ SHORT " + str.tostring(math.abs(ps), "#.##") : "  FLAT"
+    c_pos = ps > 0 ? color.lime : ps < 0 ? color.red : color.gray
     table.cell(dash, 0, 5, "POSITION",
                text_color = color.silver, text_size = size.tiny)
     table.cell(dash, 1, 5, s_pos,
