@@ -282,17 +282,17 @@ if bear_mss or (not na(bear_sw_bar) and (bar_index - bear_sw_bar) > i_mss_exp)
 bool near_val = not na(val) and low  <= val + atr14
 bool near_vah = not na(vah) and high >= vah - atr14
 
-bool entry_long  = in_session
-     and sess_bias == 1
-     and bull_mss
-     and near_val
-     and strategy.position_size == 0
+bool entry_long = in_session and
+     sess_bias == 1 and
+     bull_mss and
+     near_val and
+     strategy.position_size == 0
 
-bool entry_short = in_session
-     and sess_bias == -1
-     and bear_mss
-     and near_vah
-     and strategy.position_size == 0
+bool entry_short = in_session and
+     sess_bias == -1 and
+     bear_mss and
+     near_vah and
+     strategy.position_size == 0
 
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -334,8 +334,7 @@ if entry_long
     tp1_p       := entry_p + risk * i_tp1_r
     // TP2: take the GREATER of 2R and the VAH level so we always aim for the
     // opposite side of the value area — a key AMT profit target.
-    tp2_p       := not na(vah) ? math.max(entry_p + risk * i_tp2_r, vah)
-                                : entry_p + risk * i_tp2_r
+    tp2_p       := not na(vah) ? math.max(entry_p + risk * i_tp2_r, vah) : entry_p + risk * i_tp2_r
     run_p       := entry_p + risk * i_run_r
     be_done     := false
 
@@ -366,8 +365,7 @@ if entry_short
     float risk  = sl_p - entry_p
     tp1_p       := entry_p - risk * i_tp1_r
     // TP2: take the LESSER of 2R and the VAL level
-    tp2_p       := not na(val) ? math.min(entry_p - risk * i_tp2_r, val)
-                               : entry_p - risk * i_tp2_r
+    tp2_p       := not na(val) ? math.min(entry_p - risk * i_tp2_r, val) : entry_p - risk * i_tp2_r
     run_p       := entry_p - risk * i_run_r
     be_done     := false
 
@@ -571,10 +569,8 @@ if barstate.islast
                text_color = c_sess,       text_size = size.small)
 
     // ── Daily Bias ──────────────────────────────────────────────────────────
-    string s_bias = sess_bias ==  1 ? "▲ BULLISH" :
-                    sess_bias == -1 ? "▼ BEARISH" : "─ NEUTRAL"
-    color  c_bias = sess_bias ==  1 ? color.lime  :
-                    sess_bias == -1 ? color.red    : color.gray
+    string s_bias = sess_bias == 1 ? "▲ BULLISH" : sess_bias == -1 ? "▼ BEARISH" : "─ NEUTRAL"
+    color  c_bias = sess_bias == 1 ? color.lime : sess_bias == -1 ? color.red : color.gray
     table.cell(dash, 0, 2, "BIAS",
                text_color = color.silver, text_size = size.tiny)
     table.cell(dash, 1, 2, s_bias,
@@ -597,9 +593,7 @@ if barstate.islast
 
     // ── Open Position ───────────────────────────────────────────────────────
     float  ps     = strategy.position_size
-    string s_pos  = ps > 0 ? "▲ LONG  " + str.tostring(ps, "#.##")  :
-                    ps < 0 ? "▼ SHORT " + str.tostring(math.abs(ps), "#.##") :
-                             "  FLAT"
+    string s_pos = ps > 0 ? "▲ LONG  " + str.tostring(ps, "#.##") : ps < 0 ? "▼ SHORT " + str.tostring(math.abs(ps), "#.##") : "  FLAT"
     color  c_pos  = ps > 0 ? color.lime : ps < 0 ? color.red : color.gray
     table.cell(dash, 0, 5, "POSITION",
                text_color = color.silver, text_size = size.tiny)
