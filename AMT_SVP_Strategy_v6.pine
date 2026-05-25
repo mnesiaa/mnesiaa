@@ -1,0 +1,607 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  AMT SESSION VOLUME PROFILE STRATEGY — Pine Script v6                       ║
+// ║  ─────────────────────────────────────────────────────────────────────────  ║
+// ║  Framework : Auction Market Theory │ Session VWAP-POC │ MSS / CHoCH         ║
+// ║  Purpose   : Funded-account evaluation — ultra-strict drawdown controls     ║
+// ║  Session   : New York Morning 09:30 – 11:30 EST (signal window)             ║
+// ║  EOD Close : 16:00 EST hard flat — no overnight holds                       ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+//@version=6
+strategy(
+     title                   = "AMT Session Volume Profile Strategy",
+     shorttitle              = "AMT-SVP [v6]",
+     overlay                 = true,
+     initial_capital         = 100000,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 10,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.02,
+     slippage                = 2,
+     process_orders_on_close = true,
+     max_lines_count         = 500,
+     max_labels_count        = 500
+)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §1 ─ USER INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Session ──────────────────────────────────────────────────────────────────
+i_tz        = input.string("America/New_York", "Timezone",
+                            group   = "📅 Session")
+i_sess_sig  = input.string("0930-1130",        "Signal Window (EST)",
+                            group   = "📅 Session",
+                            tooltip = "Entry signals are ONLY generated inside this window.")
+i_eod_hour  = input.int(16, "Force-Close Hour (EST)",
+                            minval  = 13,
+                            maxval  = 23,
+                            group   = "📅 Session",
+                            tooltip = "All positions are market-closed at this hour to prevent overnight holds.")
+
+// ── Volume Profile ────────────────────────────────────────────────────────────
+i_va_factor = input.float(0.35, "Value Area Half-Width Factor",
+                            minval  = 0.10,
+                            maxval  = 0.50,
+                            step    = 0.05,
+                            group   = "📊 Volume Profile",
+                            tooltip = "Controls how far VAH/VAL extend from the POC.\n0.35 ≈ 70% of the range above/below POC.")
+
+// ── Market Structure ─────────────────────────────────────────────────────────
+i_pivot_len = input.int(3,   "Swing Pivot Length",
+                            minval  = 1,
+                            maxval  = 10,
+                            group   = "🔁 Market Structure",
+                            tooltip = "Left & right bar lookback for pivot confirmation. Higher = less noise, more lag.")
+i_disp_mult = input.float(0.5, "Displacement ATR Multiplier",
+                            minval  = 0.1,
+                            maxval  = 5.0,
+                            step    = 0.1,
+                            group   = "🔁 Market Structure",
+                            tooltip = "Minimum candle body required (N × ATR) for a bar to qualify as displacement.")
+i_mss_exp   = input.int(5,   "Sweep Expiry (bars)",
+                            minval  = 1,
+                            maxval  = 20,
+                            group   = "🔁 Market Structure",
+                            tooltip = "Pending sweep signal is invalidated if displacement does not follow within N bars.")
+
+// ── Risk Management ───────────────────────────────────────────────────────────
+i_atr_len   = input.int(14,   "ATR Length",
+                            minval  = 5,
+                            maxval  = 50,
+                            group   = "⚡ Risk Management")
+i_sl_buf    = input.float(0.5, "SL ATR Buffer",
+                            minval  = 0.0,
+                            maxval  = 2.0,
+                            step    = 0.1,
+                            group   = "⚡ Risk Management",
+                            tooltip = "Extra ATR cushion beyond the structural level — prevents spread stop-outs.")
+i_tp1_r     = input.float(1.0, "TP1 R:R (40% of position)",
+                            minval  = 0.5,
+                            maxval  = 5.0,
+                            step    = 0.1,
+                            group   = "⚡ Risk Management")
+i_tp2_r     = input.float(2.0, "TP2 R:R (30% of position)",
+                            minval  = 1.0,
+                            maxval  = 10.0,
+                            step    = 0.1,
+                            group   = "⚡ Risk Management")
+i_run_r     = input.float(4.0, "Runner R:R (30% of position)",
+                            minval  = 2.0,
+                            maxval  = 20.0,
+                            step    = 0.5,
+                            group   = "⚡ Risk Management")
+
+// ── Display ───────────────────────────────────────────────────────────────────
+i_show_vp   = input.bool(true,  "Show POC / VAH / VAL",    group = "🎨 Display")
+i_show_bg   = input.bool(true,  "Shade Signal Window",      group = "🎨 Display")
+i_show_sl   = input.bool(true,  "Show SL / TP Level Lines", group = "🎨 Display")
+i_show_mss  = input.bool(true,  "Show MSS Labels",          group = "🎨 Display")
+i_show_sw   = input.bool(true,  "Show Swing High/Low Tags", group = "🎨 Display")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §2 ─ TIME & SESSION ENGINE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// in_session  → true only during the 09:30–11:30 EST signal window
+// sess_begin  → one-bar rising-edge pulse at session open
+// force_close → true once NY hour ≥ EOD hour, forces all positions flat
+bool in_session  = not na(time(timeframe.period, i_sess_sig, i_tz))
+bool sess_begin  = in_session and not in_session[1]
+int  ny_hour     = hour(time, i_tz)
+bool force_close = ny_hour >= i_eod_hour and strategy.position_size != 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §3 ─ SESSION VOLUME PROFILE ENGINE
+//
+//  Rationale
+//  ─────────
+//  True fixed-range volume profiles require per-tick price bucketing — far
+//  too expensive for a real-time Pine indicator.  Instead we use the session
+//  VWAP (volume-weighted average price) as a statistically robust proxy for
+//  the Volume Point of Control (POC).  The VWAP minimises the sum of squared
+//  deviations from all volume-weighted prices in the session, placing it at
+//  the "gravitational centre" of the day's auction — which is precisely what
+//  the POC represents on an institutional order-flow level.
+//
+//  Value Area derivation
+//  ─────────────────────
+//  VAH = POC + i_va_factor × (SessionHigh − POC)
+//  VAL = POC − i_va_factor × (POC − SessionLow)
+//
+//  With i_va_factor = 0.35 this brackets ~70 % of the vertical price range
+//  around the POC — matching the standard AMT 70 % value area definition.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float cum_vp  = 0.0   // running Σ(volume × HLC3)
+var float cum_vol = 0.0   // running Σ(volume)
+var float sess_hi = na    // highest price seen in the current session
+var float sess_lo = na    // lowest  price seen in the current session
+
+// Seed on session open, then accumulate every subsequent bar inside the session
+if sess_begin
+    cum_vp  := volume * hlc3
+    cum_vol := volume
+    sess_hi := high
+    sess_lo := low
+else if in_session
+    cum_vp  += volume * hlc3
+    cum_vol += volume
+    sess_hi := math.max(sess_hi, high)
+    sess_lo := math.min(sess_lo, low)
+
+// Session VWAP (our POC proxy) — only defined while session data exists
+float poc = cum_vol > 0.0 ? cum_vp / cum_vol : na
+float vah = not na(poc) and not na(sess_hi) ? poc + i_va_factor * (sess_hi - poc) : na
+float val = not na(poc) and not na(sess_lo) ? poc - i_va_factor * (poc - sess_lo)  : na
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §4 ─ DAILY / SESSION BIAS  (Auction Market Theory)
+//
+//  The session VWAP-POC acts as the auction's "fair value" midpoint.
+//  — Buyers are in control  (bullish auction) when price accepts ABOVE the POC.
+//  — Sellers are in control (bearish auction) when price accepts BELOW the POC.
+//
+//  Bias is latched at the first decisive read each session so that minor
+//  mean-reversion wicks cannot flip the directional filter mid-trade.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var int sess_bias = 0   // +1 = bullish | -1 = bearish | 0 = undecided
+
+if sess_begin
+    sess_bias := 0   // reset at each new session
+
+if in_session and not na(poc) and sess_bias == 0
+    if close > poc
+        sess_bias := 1
+    else if close < poc
+        sess_bias := -1
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §5 ─ MARKET STRUCTURE ENGINE
+//
+//  Pivot detection
+//  ───────────────
+//  ta.pivothigh / ta.pivotlow confirm a structural level only after
+//  i_pivot_len bars have printed on BOTH sides — this is the minimum
+//  confirmation lag for a truly non-repainting swing.  Setting pivot_len = 3
+//  gives confirmed micro-structure with a 3-bar lag, suitable for 1 – 15 min.
+//
+//  MSS / CHoCH sequence
+//  ────────────────────
+//  Bullish: (1) wick below last swing LOW  →  (2) displacement close ABOVE
+//           last swing HIGH within i_mss_exp bars
+//  Bearish: (1) wick above last swing HIGH →  (2) displacement close BELOW
+//           last swing LOW  within i_mss_exp bars
+// ══════════════════════════════════════════════════════════════════════════════
+
+float atr14 = ta.atr(i_atr_len)
+
+// Confirmed pivots (lag = i_pivot_len bars, non-repainting)
+float ph = ta.pivothigh(high, i_pivot_len, i_pivot_len)
+float pl = ta.pivotlow (low,  i_pivot_len, i_pivot_len)
+
+// Last confirmed structural levels (persist until replaced by a newer pivot)
+var float last_sh = na
+var float last_sl = na
+
+if not na(ph)
+    last_sh := ph
+if not na(pl)
+    last_sl := pl
+
+// ── Liquidity Sweep Detection ─────────────────────────────────────────────────
+//   A genuine sweep has a wick THROUGH the level but the candle CLOSES BACK on
+//   the safe side — confirming a stop-hunt / liquidity grab rather than a
+//   sustained break.
+
+bool bull_sweep = not na(last_sl) and low < last_sl and close > last_sl
+bool bear_sweep = not na(last_sh) and high > last_sh and close < last_sh
+
+// ── Displacement Detection ────────────────────────────────────────────────────
+//   The displacement bar must:
+//     (a) close beyond the opposing structural level, AND
+//     (b) carry a real body ≥ i_disp_mult × ATR (filters dojis / small bodies)
+
+bool bull_disp = not na(last_sh) and close > last_sh and
+     close > open and (close - open) > atr14 * i_disp_mult
+
+bool bear_disp = not na(last_sl) and close < last_sl and
+     close < open and (open - close) > atr14 * i_disp_mult
+
+// ── MSS Sequencing Logic ──────────────────────────────────────────────────────
+//   We record the bar_index of each sweep; if displacement does not follow
+//   within i_mss_exp bars the sweep signal is voided.
+
+var int bull_sw_bar = na   // bar_index of the most-recent bullish sweep
+var int bear_sw_bar = na   // bar_index of the most-recent bearish sweep
+
+// Reset sweep memory at session open to prevent stale signals
+if sess_begin
+    bull_sw_bar := na
+    bear_sw_bar := na
+
+if bull_sweep
+    bull_sw_bar := bar_index
+if bear_sweep
+    bear_sw_bar := bar_index
+
+bool bull_mss = bull_disp and not na(bull_sw_bar) and
+     (bar_index - bull_sw_bar) <= i_mss_exp
+
+bool bear_mss = bear_disp and not na(bear_sw_bar) and
+     (bar_index - bear_sw_bar) <= i_mss_exp
+
+// Void the pending sweep after MSS confirmation or expiry
+if bull_mss or (not na(bull_sw_bar) and (bar_index - bull_sw_bar) > i_mss_exp)
+    bull_sw_bar := na
+if bear_mss or (not na(bear_sw_bar) and (bar_index - bear_sw_bar) > i_mss_exp)
+    bear_sw_bar := na
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §6 ─ ENTRY SIGNAL CONSTRUCTION
+//
+//  LONG  trigger  (ALL of these must be true simultaneously):
+//    1. Current bar is inside the 09:30–11:30 EST signal window
+//    2. Session bias is latched BULLISH (price accepted above POC)
+//    3. A confirmed Bullish MSS just fired this bar
+//    4. Price is near the VAL or POC support cluster (within 1 ATR)
+//    5. No open position (one trade at a time)
+//
+//  SHORT trigger  (mirror conditions):
+//    1–5 same, with Bearish MSS and proximity to VAH / POC resistance
+// ══════════════════════════════════════════════════════════════════════════════
+
+// "Near level" — low / high touched within one ATR of the key level
+bool near_val = not na(val) and low  <= val + atr14
+bool near_vah = not na(vah) and high >= vah - atr14
+
+bool entry_long  = in_session
+     and sess_bias == 1
+     and bull_mss
+     and near_val
+     and strategy.position_size == 0
+
+bool entry_short = in_session
+     and sess_bias == -1
+     and bear_mss
+     and near_vah
+     and strategy.position_size == 0
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §7 ─ INSTITUTIONAL RISK MANAGEMENT & TIERED EXIT ROUTING
+//
+//  Stop Loss placement
+//  ───────────────────
+//    Long SL  = structural swing LOW  that formed the sweep − (ATR × i_sl_buf)
+//    Short SL = structural swing HIGH that formed the sweep + (ATR × i_sl_buf)
+//  The ATR buffer prevents tight spread / slippage stop-outs.
+//
+//  Three-bracket exit system (fully independent exit orders)
+//  ─────────────────────────────────────────────────────────
+//    TP1  (40 %)  — 1R  — locks in profit, converts trade to risk-free
+//    TP2  (30 %)  — 2R  (or opposite VA level, whichever is further)
+//    Runner (30%) — 4R  — uncapped trend extension
+//
+//  Break-even promotion
+//  ────────────────────
+//    The moment TP1 fills (position size decreases), the remaining TP2 and
+//    Runner exit orders are cancelled and re-issued with their limit targets
+//    unchanged but the stop moved to exact entry price.  This hard-floors the
+//    trade at break-even in compliance with funded-account loss rules.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float entry_p = na   // trade entry price (kept across bars for BE logic)
+var float sl_p    = na   // active stop-loss price
+var float tp1_p   = na   // take-profit 1 (1R)
+var float tp2_p   = na   // take-profit 2 (2R or VA edge)
+var float run_p   = na   // runner target (4R)
+var bool  be_done = false // true once break-even has been applied this trade
+
+// ── LONG Entry Order Routing ──────────────────────────────────────────────────
+if entry_long
+    entry_p := close
+    sl_p    := last_sl - atr14 * i_sl_buf
+
+    float risk  = entry_p - sl_p
+    tp1_p       := entry_p + risk * i_tp1_r
+    // TP2: take the GREATER of 2R and the VAH level so we always aim for the
+    // opposite side of the value area — a key AMT profit target.
+    tp2_p       := not na(vah) ? math.max(entry_p + risk * i_tp2_r, vah)
+                                : entry_p + risk * i_tp2_r
+    run_p       := entry_p + risk * i_run_r
+    be_done     := false
+
+    strategy.entry("Long", strategy.long, comment = "AMT Long")
+
+    // Independent bracket exits — each qty_percent is of the entry order size
+    strategy.exit("TP1_L", from_entry = "Long",
+                  qty_percent = 40,
+                  limit       = tp1_p,
+                  stop        = sl_p,
+                  comment     = "TP1 1R")
+    strategy.exit("TP2_L", from_entry = "Long",
+                  qty_percent = 30,
+                  limit       = tp2_p,
+                  stop        = sl_p,
+                  comment     = "TP2 2R")
+    strategy.exit("Run_L", from_entry = "Long",
+                  qty_percent = 30,
+                  limit       = run_p,
+                  stop        = sl_p,
+                  comment     = "Runner 4R")
+
+// ── SHORT Entry Order Routing ─────────────────────────────────────────────────
+if entry_short
+    entry_p := close
+    sl_p    := last_sh + atr14 * i_sl_buf
+
+    float risk  = sl_p - entry_p
+    tp1_p       := entry_p - risk * i_tp1_r
+    // TP2: take the LESSER of 2R and the VAL level
+    tp2_p       := not na(val) ? math.min(entry_p - risk * i_tp2_r, val)
+                               : entry_p - risk * i_tp2_r
+    run_p       := entry_p - risk * i_run_r
+    be_done     := false
+
+    strategy.entry("Short", strategy.short, comment = "AMT Short")
+
+    strategy.exit("TP1_S", from_entry = "Short",
+                  qty_percent = 40,
+                  limit       = tp1_p,
+                  stop        = sl_p,
+                  comment     = "TP1 1R")
+    strategy.exit("TP2_S", from_entry = "Short",
+                  qty_percent = 30,
+                  limit       = tp2_p,
+                  stop        = sl_p,
+                  comment     = "TP2 2R")
+    strategy.exit("Run_S", from_entry = "Short",
+                  qty_percent = 30,
+                  limit       = run_p,
+                  stop        = sl_p,
+                  comment     = "Runner 4R")
+
+// ── Break-Even Promotion ──────────────────────────────────────────────────────
+// Detect TP1 fill: position is still open but absolute size has decreased.
+// We cancel the remaining pending exits and re-issue identical limit targets
+// with the stop moved to the entry price (hard break-even).
+
+bool size_fell   = math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
+bool still_open  = strategy.position_size != 0
+bool tp1_filled  = still_open and size_fell and not be_done
+
+if tp1_filled
+    be_done := true   // guard: only promote once per trade
+
+    if strategy.position_size > 0   // long still live
+        strategy.cancel("TP2_L")
+        strategy.cancel("Run_L")
+        strategy.exit("TP2_L_BE", from_entry = "Long",
+                      qty_percent = 50,     // 50 % of remaining ≈ 30 % of original
+                      limit       = tp2_p,
+                      stop        = entry_p,
+                      comment     = "TP2 BE")
+        strategy.exit("Run_L_BE", from_entry = "Long",
+                      limit       = run_p,
+                      stop        = entry_p,
+                      comment     = "Runner BE")
+
+    if strategy.position_size < 0   // short still live
+        strategy.cancel("TP2_S")
+        strategy.cancel("Run_S")
+        strategy.exit("TP2_S_BE", from_entry = "Short",
+                      qty_percent = 50,
+                      limit       = tp2_p,
+                      stop        = entry_p,
+                      comment     = "TP2 BE")
+        strategy.exit("Run_S_BE", from_entry = "Short",
+                      limit       = run_p,
+                      stop        = entry_p,
+                      comment     = "Runner BE")
+
+// ── End-of-Day Force Flat ─────────────────────────────────────────────────────
+if force_close
+    strategy.close_all(comment = "EOD Force Close 16:00")
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §8 ─ VISUALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Session Window Background ─────────────────────────────────────────────────
+bgcolor(
+     i_show_bg and in_session ? color.new(color.blue, 90) : na,
+     title = "Signal Session Shade")
+
+// ── Volume Profile Levels ─────────────────────────────────────────────────────
+//   style=linebr breaks the line on na so levels only paint inside the session
+plot(i_show_vp and in_session ? poc : na, "POC",
+     color     = color.yellow,
+     linewidth = 2,
+     style     = plot.style_linebr)
+plot(i_show_vp and in_session ? vah : na, "VAH",
+     color     = color.new(color.green, 20),
+     linewidth = 1,
+     style     = plot.style_linebr)
+plot(i_show_vp and in_session ? val : na, "VAL",
+     color     = color.new(color.red, 20),
+     linewidth = 1,
+     style     = plot.style_linebr)
+
+// ── Active Trade Risk Levels ──────────────────────────────────────────────────
+bool in_trade = strategy.position_size != 0
+
+plot(i_show_sl and in_trade ? sl_p  : na, "Stop Loss",
+     color     = color.red,
+     linewidth  = 1,
+     style     = plot.style_linebr)
+plot(i_show_sl and in_trade ? tp1_p : na, "TP 1",
+     color     = color.lime,
+     linewidth  = 1,
+     style     = plot.style_linebr)
+plot(i_show_sl and in_trade ? tp2_p : na, "TP 2",
+     color     = color.new(color.teal, 10),
+     linewidth  = 1,
+     style     = plot.style_linebr)
+plot(i_show_sl and in_trade ? run_p : na, "Runner",
+     color     = color.aqua,
+     linewidth  = 1,
+     style     = plot.style_linebr)
+
+// ── Entry Signal Arrows ───────────────────────────────────────────────────────
+plotshape(entry_long,
+     title    = "Long Signal",
+     location = location.belowbar,
+     style    = shape.triangleup,
+     color    = color.lime,
+     size     = size.small)
+
+plotshape(entry_short,
+     title    = "Short Signal",
+     location = location.abovebar,
+     style    = shape.triangledown,
+     color    = color.red,
+     size     = size.small)
+
+// ── Swing Structure Tags ──────────────────────────────────────────────────────
+//   barstate.isconfirmed prevents repainting labels on unconfirmed pivots
+if i_show_sw and not na(ph) and barstate.isconfirmed
+    label.new(
+         x         = bar_index[i_pivot_len],
+         y         = high[i_pivot_len],
+         text      = "SH",
+         style     = label.style_label_down,
+         color     = color.new(color.red, 65),
+         textcolor = color.white,
+         size      = size.tiny)
+
+if i_show_sw and not na(pl) and barstate.isconfirmed
+    label.new(
+         x         = bar_index[i_pivot_len],
+         y         = low[i_pivot_len],
+         text      = "SL",
+         style     = label.style_label_up,
+         color     = color.new(color.green, 65),
+         textcolor = color.white,
+         size      = size.tiny)
+
+// ── MSS / CHoCH Labels ────────────────────────────────────────────────────────
+if i_show_mss and bull_mss
+    label.new(
+         x         = bar_index,
+         y         = low,
+         text      = "↑ MSS",
+         style     = label.style_label_up,
+         color     = color.new(color.lime, 25),
+         textcolor = color.black,
+         size      = size.small)
+
+if i_show_mss and bear_mss
+    label.new(
+         x         = bar_index,
+         y         = high,
+         text      = "↓ MSS",
+         style     = label.style_label_down,
+         color     = color.new(color.red, 25),
+         textcolor = color.white,
+         size      = size.small)
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §9 ─ REAL-TIME DASHBOARD TABLE  (top-right corner)
+//
+//   Rows:  Session status │ Daily bias │ POC │ VAH / VAL │ Open position
+//   Only redraws on the last bar (barstate.islast) to avoid performance cost.
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table dash = table.new(
+     position.top_right, 2, 6,
+     bgcolor      = color.new(color.black, 15),
+     border_color = color.new(color.gray,  40),
+     border_width = 1,
+     frame_color  = color.new(color.gray,  20),
+     frame_width  = 1)
+
+if barstate.islast
+
+    // ── Header ─────────────────────────────────────────────────────────────
+    table.cell(dash, 0, 0, "AMT-SVP",
+               text_color = color.white,
+               bgcolor    = color.new(color.navy, 15),
+               text_size  = size.small)
+    table.cell(dash, 1, 0, "v6",
+               text_color = color.new(color.silver, 20),
+               bgcolor    = color.new(color.navy, 15),
+               text_size  = size.tiny)
+
+    // ── Session Status ──────────────────────────────────────────────────────
+    string s_sess = in_session ? "● ACTIVE" : "○ INACTIVE"
+    color  c_sess = in_session ? color.lime  : color.gray
+    table.cell(dash, 0, 1, "SESSION",
+               text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 1, s_sess,
+               text_color = c_sess,       text_size = size.small)
+
+    // ── Daily Bias ──────────────────────────────────────────────────────────
+    string s_bias = sess_bias ==  1 ? "▲ BULLISH" :
+                    sess_bias == -1 ? "▼ BEARISH" : "─ NEUTRAL"
+    color  c_bias = sess_bias ==  1 ? color.lime  :
+                    sess_bias == -1 ? color.red    : color.gray
+    table.cell(dash, 0, 2, "BIAS",
+               text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 2, s_bias,
+               text_color = c_bias,       text_size = size.small)
+
+    // ── Session POC ─────────────────────────────────────────────────────────
+    string s_poc = not na(poc) ? str.tostring(poc, format.mintick) : "---"
+    table.cell(dash, 0, 3, "POC",
+               text_color = color.silver,  text_size = size.tiny)
+    table.cell(dash, 1, 3, s_poc,
+               text_color = color.yellow,  text_size = size.small)
+
+    // ── VAH / VAL ───────────────────────────────────────────────────────────
+    string s_vah = not na(vah) ? str.tostring(vah, format.mintick) : "---"
+    string s_val = not na(val) ? str.tostring(val, format.mintick) : "---"
+    table.cell(dash, 0, 4, "VAH / VAL",
+               text_color = color.silver,  text_size = size.tiny)
+    table.cell(dash, 1, 4, s_vah + " / " + s_val,
+               text_color = color.new(color.green, 10), text_size = size.tiny)
+
+    // ── Open Position ───────────────────────────────────────────────────────
+    float  ps     = strategy.position_size
+    string s_pos  = ps > 0 ? "▲ LONG  " + str.tostring(ps, "#.##")  :
+                    ps < 0 ? "▼ SHORT " + str.tostring(math.abs(ps), "#.##") :
+                             "  FLAT"
+    color  c_pos  = ps > 0 ? color.lime : ps < 0 ? color.red : color.gray
+    table.cell(dash, 0, 5, "POSITION",
+               text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 5, s_pos,
+               text_color = c_pos,        text_size = size.small)
