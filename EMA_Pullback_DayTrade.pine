@@ -13,208 +13,154 @@ strategy(
      calc_on_every_tick      = false,
      process_orders_on_close = true)
 
-// ===========================================================
-// INPUTS
-// ===========================================================
+// ─── INPUTS ───────────────────────────────────────────────────
 
-i_emaFast    = input.int(20,   "EMA Fast (Pullback)",  minval = 5,  maxval = 50,  group = "EMAs")
-i_emaSlow    = input.int(50,   "EMA Slow (Trend)",     minval = 20, maxval = 200, group = "EMAs")
+int   i_emaFast    = input.int(20,    "EMA Fast (Pullback)", minval=5,   maxval=50,  group="EMAs")
+int   i_emaSlow    = input.int(50,    "EMA Slow (Trend)",    minval=20,  maxval=200, group="EMAs")
+int   i_rsiLen     = input.int(14,    "RSI Length",          minval=2,               group="RSI")
+int   i_rsiOB      = input.int(70,    "RSI Overbought",      minval=60,  maxval=80,  group="RSI")
+int   i_rsiOS      = input.int(30,    "RSI Oversold",        minval=20,  maxval=40,  group="RSI")
+int   i_atrLen     = input.int(14,    "ATR Length",          minval=2,               group="Risk")
+float i_atrSLMult  = input.float(1.0, "ATR SL Multiplier",  minval=0.5, step=0.1,   group="Risk")
+float i_tp1R       = input.float(1.5, "TP1 R-Multiple",     minval=0.5, step=0.25,  group="Risk")
+float i_tp2R       = input.float(3.0, "TP2 R-Multiple",     minval=1.0, step=0.25,  group="Risk")
+float i_tp1Pct     = input.float(60.0,"% Exit at TP1",      minval=10,  maxval=90,  group="Risk")
+int   i_sesStart   = input.int(930,   "Session Start HHMM EST",         group="Session")
+int   i_sesEnd     = input.int(1130,  "Session End HHMM EST",           group="Session")
+bool  i_useSession = input.bool(true, "Filter to NY AM Session",        group="Session")
+bool  i_showDash   = input.bool(true, "Show Dashboard",                 group="Visual")
+bool  i_showLevels = input.bool(true, "Show SL / TP Lines",             group="Visual")
 
-i_rsiLen     = input.int(14,   "RSI Length",           minval = 2,  group = "RSI")
-i_rsiOB      = input.int(70,   "RSI Overbought",       minval = 60, maxval = 80,  group = "RSI")
-i_rsiOS      = input.int(30,   "RSI Oversold",         minval = 20, maxval = 40,  group = "RSI")
+// ─── INDICATORS ───────────────────────────────────────────────
 
-i_atrLen     = input.int(14,   "ATR Length",           minval = 2,  group = "Risk")
-i_atrSLMult  = input.float(1.0,"ATR SL Multiplier",    minval = 0.5, step = 0.1, group = "Risk")
-i_tp1R       = input.float(1.5,"TP1 R-Multiple",       minval = 0.5, step = 0.25, group = "Risk")
-i_tp2R       = input.float(3.0,"TP2 R-Multiple",       minval = 1.0, step = 0.25, group = "Risk")
-i_tp1Pct     = input.float(60.0, "% Exit at TP1",      minval = 10,  maxval = 90,  group = "Risk")
+float emaFast = ta.ema(close, i_emaFast)
+float emaSlow = ta.ema(close, i_emaSlow)
+float rsiVal  = ta.rsi(close, i_rsiLen)
+float atrVal  = ta.atr(i_atrLen)
+float vwapVal = ta.vwap(hlc3)
 
-i_sesStart   = input.int(930,  "Session Start HHMM EST", group = "Session")
-i_sesEnd     = input.int(1130, "Session End HHMM EST",   group = "Session")
-i_useSession = input.bool(true,"Filter to NY AM Session", group = "Session")
+// ─── SESSION ──────────────────────────────────────────────────
 
-i_showDash   = input.bool(true, "Show Dashboard",        group = "Visual")
-i_showLevels = input.bool(true, "Show SL / TP Lines",    group = "Visual")
+int  barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
 
-// ===========================================================
-// INDICATORS
-// ===========================================================
+// ─── CONDITIONS ───────────────────────────────────────────────
 
-emaFast  = ta.ema(close, i_emaFast)
-emaSlow  = ta.ema(close, i_emaSlow)
-rsi      = ta.rsi(close, i_rsiLen)
-atr      = ta.atr(i_atrLen)
-vwap_val = ta.vwap(hlc3)
+bool trendUp      = emaSlow > emaSlow[3]
+bool trendDown    = emaSlow < emaSlow[3]
+bool emaAlignUp   = emaFast > emaSlow
+bool emaAlignDown = emaFast < emaSlow
+bool pullbackLong  = low[1]  <= emaFast[1] and close > emaFast and close > open
+bool pullbackShort = high[1] >= emaFast[1] and close < emaFast and close < open
+bool aboveVWAP    = close > vwapVal
+bool belowVWAP    = close < vwapVal
+bool rsiOkLong    = rsiVal < i_rsiOB
+bool rsiOkShort   = rsiVal > i_rsiOS
+bool noPos        = strategy.position_size == 0.0
 
-// ===========================================================
-// SESSION FILTER
-// ===========================================================
+bool longSignal  = inSession and trendUp   and emaAlignUp   and pullbackLong  and aboveVWAP and rsiOkLong  and noPos
+bool shortSignal = inSession and trendDown and emaAlignDown and pullbackShort and belowVWAP and rsiOkShort and noPos
 
-barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
-inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+// ─── SL / TP (computed once per signal, stored in var) ────────
 
-// ===========================================================
-// TREND + ENTRY CONDITIONS
-// ===========================================================
-
-// Trend defined by slow EMA slope
-trendUp   = emaSlow > emaSlow[3]
-trendDown = emaSlow < emaSlow[3]
-
-// Fast EMA alignment
-emaAlignUp   = emaFast > emaSlow
-emaAlignDown = emaFast < emaSlow
-
-// Pullback: price dipped to or below fast EMA last bar, now reclaims above it
-pullbackLong  = low[1] <= emaFast[1] and close > emaFast and close > open
-pullbackShort = high[1] >= emaFast[1] and close < emaFast and close < open
-
-// VWAP side confirmation
-aboveVWAP = close > vwap_val
-belowVWAP = close < vwap_val
-
-// RSI — avoid chasing extremes
-rsiOkLong  = rsi < i_rsiOB
-rsiOkShort = rsi > i_rsiOS
-
-// ===========================================================
-// SIGNALS
-// ===========================================================
-
-longSignal  = inSession and trendUp   and emaAlignUp   and pullbackLong  and aboveVWAP and rsiOkLong  and strategy.position_size == 0
-shortSignal = inSession and trendDown and emaAlignDown and pullbackShort and belowVWAP and rsiOkShort and strategy.position_size == 0
-
-// ===========================================================
-// STOP LOSS — below/above the pullback candle
-// ===========================================================
-
-var float longSL  = na
-var float shortSL = na
+var float longSL   = na
+var float longTP1  = na
+var float longTP2  = na
+var float shortSL  = na
+var float shortTP1 = na
+var float shortTP2 = na
 
 if longSignal
-    longSL  := math.min(low, low[1]) - atr * i_atrSLMult
+    longSL  := math.min(low, low[1]) - atrVal * i_atrSLMult
+    longTP1 := close + (close - longSL) * i_tp1R
+    longTP2 := close + (close - longSL) * i_tp2R
 
 if shortSignal
-    shortSL := math.max(high, high[1]) + atr * i_atrSLMult
+    shortSL  := math.max(high, high[1]) + atrVal * i_atrSLMult
+    shortTP1 := close - (shortSL - close) * i_tp1R
+    shortTP2 := close - (shortSL - close) * i_tp2R
 
-// ===========================================================
-// TAKE PROFIT — R-multiples off entry
-// ===========================================================
+// ─── EXECUTION ────────────────────────────────────────────────
 
-var float lTP1 = na
-var float lTP2 = na
-var float sTP1 = na
-var float sTP2 = na
-
-if longSignal and not na(longSL)
-    float riskL = close - longSL
-    lTP1 := close + riskL * i_tp1R
-    lTP2 := close + riskL * i_tp2R
-
-if shortSignal and not na(shortSL)
-    float riskS = shortSL - close
-    sTP1 := close - riskS * i_tp1R
-    sTP2 := close - riskS * i_tp2R
-
-// ===========================================================
-// EXECUTION
-// ===========================================================
-
-float tp2Pct = 100.0 - i_tp1Pct
+float tp1Qty = i_tp1Pct
+float tp2Qty = 100.0 - i_tp1Pct
 
 if longSignal
-    strategy.entry("Long",  strategy.long,  comment = "EPD Long")
+    strategy.entry("Long",  strategy.long,  comment="EPD Long")
 
 if shortSignal
-    strategy.entry("Short", strategy.short, comment = "EPD Short")
+    strategy.entry("Short", strategy.short, comment="EPD Short")
 
-if strategy.position_size > 0 and not na(longSL)
-    strategy.exit("L-TP1", "Long",  qty_percent = i_tp1Pct, limit = lTP1, stop = longSL,  comment = "TP1")
-    strategy.exit("L-TP2", "Long",  qty_percent = tp2Pct,   limit = lTP2, stop = longSL,  comment = "TP2")
+if strategy.position_size > 0.0 and not na(longSL)
+    strategy.exit("L-TP1", "Long",  qty_percent=tp1Qty, limit=longTP1, stop=longSL,  comment="TP1")
+    strategy.exit("L-TP2", "Long",  qty_percent=tp2Qty, limit=longTP2, stop=longSL,  comment="TP2")
 
-if strategy.position_size < 0 and not na(shortSL)
-    strategy.exit("S-TP1", "Short", qty_percent = i_tp1Pct, limit = sTP1, stop = shortSL, comment = "TP1")
-    strategy.exit("S-TP2", "Short", qty_percent = tp2Pct,   limit = sTP2, stop = shortSL, comment = "TP2")
+if strategy.position_size < 0.0 and not na(shortSL)
+    strategy.exit("S-TP1", "Short", qty_percent=tp1Qty, limit=shortTP1, stop=shortSL, comment="TP1")
+    strategy.exit("S-TP2", "Short", qty_percent=tp2Qty, limit=shortTP2, stop=shortSL, comment="TP2")
 
-// ===========================================================
-// VISUAL
-// ===========================================================
+// ─── VISUALS ──────────────────────────────────────────────────
 
-bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title = "Session BG")
+bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
 
-plot(emaFast,  "EMA Fast", color = color.new(color.yellow, 0), linewidth = 2)
-plot(emaSlow,  "EMA Slow", color = color.new(color.orange, 0), linewidth = 2)
-plot(vwap_val, "VWAP",     color = color.new(color.purple, 0), linewidth = 2)
+plot(emaFast, "EMA Fast", color=color.new(color.yellow, 0), linewidth=2)
+plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+plot(vwapVal, "VWAP",     color=color.new(color.purple, 0), linewidth=2)
 
-plotshape(longSignal,  location = location.belowbar, style = shape.triangleup,
-     color = color.new(color.lime, 0), size = size.normal, title = "Long Signal")
-plotshape(shortSignal, location = location.abovebar, style = shape.triangledown,
-     color = color.new(color.red,  0), size = size.normal, title = "Short Signal")
+plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
+     color=color.new(color.lime, 0), size=size.normal, title="Long Signal")
+plotshape(shortSignal, location=location.abovebar, style=shape.triangledown,
+     color=color.new(color.red,  0), size=size.normal, title="Short Signal")
 
-// SL / TP lines
-if i_showLevels
-    int ext = bar_index + 30
+// Pre-compute line end x so it's available in all drawing blocks
+int lineEnd = bar_index + 30
 
-    if longSignal and not na(longSL)
-        line.new(bar_index, longSL, ext, longSL, color = color.new(color.red,   0), style = line.style_dashed, width = 1)
-        line.new(bar_index, lTP1,   ext, lTP1,   color = color.new(color.lime,  0), style = line.style_dashed, width = 1)
-        line.new(bar_index, lTP2,   ext, lTP2,   color = color.new(color.green, 0), style = line.style_dashed, width = 1)
-        label.new(ext, longSL, "SL",  color = color.new(color.red,   10), textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
-        label.new(ext, lTP1,   "TP1", color = color.new(color.lime,  10), textcolor = color.black, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
-        label.new(ext, lTP2,   "TP2", color = color.new(color.green, 10), textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+if i_showLevels and longSignal and not na(longSL)
+    line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
-    if shortSignal and not na(shortSL)
-        line.new(bar_index, shortSL, ext, shortSL, color = color.new(color.red,   0), style = line.style_dashed, width = 1)
-        line.new(bar_index, sTP1,    ext, sTP1,    color = color.new(color.lime,  0), style = line.style_dashed, width = 1)
-        line.new(bar_index, sTP2,    ext, sTP2,    color = color.new(color.green, 0), style = line.style_dashed, width = 1)
-        label.new(ext, shortSL, "SL",  color = color.new(color.red,   10), textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
-        label.new(ext, sTP1,    "TP1", color = color.new(color.lime,  10), textcolor = color.black, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
-        label.new(ext, sTP2,    "TP2", color = color.new(color.green, 10), textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+if i_showLevels and shortSignal and not na(shortSL)
+    line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
-// ===========================================================
-// DASHBOARD
-// ===========================================================
+// ─── DASHBOARD ────────────────────────────────────────────────
 
 if i_showDash
-    int   tot = strategy.wintrades + strategy.losstrades
-    string wr = tot > 0
-         ? str.tostring(math.round(strategy.wintrades / tot * 100, 1)) + "%"
-         : "N/A"
-    string pf = strategy.grossloss != 0
-         ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
-         : "N/A"
-    string pos = strategy.position_size > 0 ? "LONG"  :
-                 strategy.position_size < 0 ? "SHORT" : "FLAT"
-    string tr  = trendUp ? "UP" : trendDown ? "DOWN" : "NEUTRAL"
+    int   tot    = strategy.wintrades + strategy.losstrades
+    float winPct = tot > 0 ? float(strategy.wintrades) / float(tot) * 100.0 : 0.0
+    float pfRaw  = strategy.grossloss != 0.0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
+    string winStr = tot > 0 ? str.tostring(math.round(winPct, 1)) + "%" : "N/A"
+    string pfStr  = strategy.grossloss != 0.0 ? str.tostring(math.round(pfRaw, 2)) : "N/A"
+    string posStr = strategy.position_size > 0.0 ? "LONG" : strategy.position_size < 0.0 ? "SHORT" : "FLAT"
+    string trStr  = trendUp ? "UP" : trendDown ? "DOWN" : "NEUTRAL"
 
-    string dash =
-         "=== EPD v1.0 ===\n"            +
-         "Session : " + (inSession ? "ACTIVE" : "OFF")   + "\n" +
-         "Trend   : " + tr                                + "\n" +
-         "VWAP    : " + (aboveVWAP ? "ABOVE" : "BELOW")  + "\n" +
-         "RSI     : " + str.tostring(math.round(rsi, 1)) + "\n" +
-         "Position: " + pos                               + "\n" +
-         "----------------\n"                             +
-         "Trades  : " + str.tostring(tot)                + "\n" +
-         "Win Rate: " + wr                                + "\n" +
-         "Prof Fac: " + pf                                + "\n" +
+    string dash = "=== EPD v1.0 ===\n" +
+         "Session : " + (inSession ? "ACTIVE" : "OFF") + "\n" +
+         "Trend   : " + trStr + "\n" +
+         "VWAP    : " + (aboveVWAP ? "ABOVE" : "BELOW") + "\n" +
+         "RSI     : " + str.tostring(math.round(rsiVal, 1)) + "\n" +
+         "Position: " + posStr + "\n" +
+         "----------------\n" +
+         "Trades  : " + str.tostring(tot) + "\n" +
+         "Win Rate: " + winStr + "\n" +
+         "Prof Fac: " + pfStr + "\n" +
          "Net PnL : $" + str.tostring(math.round(strategy.netprofit, 2))
 
     var table tbl = table.new(position.top_right, 1, 1,
-         bgcolor      = color.new(color.black, 10),
-         border_color = color.new(color.gray,  30),
-         border_width = 1,
-         frame_color  = color.new(color.gray,  20),
-         frame_width  = 1)
+         bgcolor=color.new(color.black, 10), border_color=color.new(color.gray, 30),
+         border_width=1, frame_color=color.new(color.gray, 20), frame_width=1)
     table.cell(tbl, 0, 0, dash,
-         text_color = color.white,
-         text_size  = size.small,
-         bgcolor    = color.new(color.black, 15))
+         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 15))
 
-// ===========================================================
-// ALERTS
-// ===========================================================
+// ─── ALERTS ───────────────────────────────────────────────────
 
-alertcondition(longSignal,  title = "EPD Long Signal",  message = "EPD Long  | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(shortSignal, title = "EPD Short Signal", message = "EPD Short | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(longSignal,  title="EPD Long Signal",  message="EPD Long  | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(shortSignal, title="EPD Short Signal", message="EPD Short | {{ticker}} @ {{close}} | {{time}}")
