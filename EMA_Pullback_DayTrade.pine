@@ -28,7 +28,7 @@ i_atrLen     = input.int(14,   "ATR Length",           minval = 2,  group = "Ris
 i_atrSLMult  = input.float(1.0,"ATR SL Multiplier",    minval = 0.5, step = 0.1, group = "Risk")
 i_tp1R       = input.float(1.5,"TP1 R-Multiple",       minval = 0.5, step = 0.25, group = "Risk")
 i_tp2R       = input.float(3.0,"TP2 R-Multiple",       minval = 1.0, step = 0.25, group = "Risk")
-i_tp1Pct     = input.float(60, "% Exit at TP1",        minval = 10,  maxval = 90,  group = "Risk")
+i_tp1Pct     = input.float(60.0, "% Exit at TP1",      minval = 10,  maxval = 90,  group = "Risk")
 
 i_sesStart   = input.int(930,  "Session Start HHMM EST", group = "Session")
 i_sesEnd     = input.int(1130, "Session End HHMM EST",   group = "Session")
@@ -108,18 +108,20 @@ var float sTP1 = na
 var float sTP2 = na
 
 if longSignal and not na(longSL)
-    float r = close - longSL
-    lTP1 := close + r * i_tp1R
-    lTP2 := close + r * i_tp2R
+    float riskL = close - longSL
+    lTP1 := close + riskL * i_tp1R
+    lTP2 := close + riskL * i_tp2R
 
 if shortSignal and not na(shortSL)
-    float r = shortSL - close
-    sTP1 := close - r * i_tp1R
-    sTP2 := close - r * i_tp2R
+    float riskS = shortSL - close
+    sTP1 := close - riskS * i_tp1R
+    sTP2 := close - riskS * i_tp2R
 
 // ===========================================================
 // EXECUTION
 // ===========================================================
+
+float tp2Pct = 100.0 - i_tp1Pct
 
 if longSignal
     strategy.entry("Long",  strategy.long,  comment = "EPD Long")
@@ -128,12 +130,12 @@ if shortSignal
     strategy.entry("Short", strategy.short, comment = "EPD Short")
 
 if strategy.position_size > 0 and not na(longSL)
-    strategy.exit("L-TP1", "Long",  qty_percent = i_tp1Pct,          limit = lTP1, stop = longSL,  comment = "TP1")
-    strategy.exit("L-TP2", "Long",  qty_percent = 100 - i_tp1Pct,    limit = lTP2, stop = longSL,  comment = "TP2")
+    strategy.exit("L-TP1", "Long",  qty_percent = i_tp1Pct, limit = lTP1, stop = longSL,  comment = "TP1")
+    strategy.exit("L-TP2", "Long",  qty_percent = tp2Pct,   limit = lTP2, stop = longSL,  comment = "TP2")
 
 if strategy.position_size < 0 and not na(shortSL)
-    strategy.exit("S-TP1", "Short", qty_percent = i_tp1Pct,          limit = sTP1, stop = shortSL, comment = "TP1")
-    strategy.exit("S-TP2", "Short", qty_percent = 100 - i_tp1Pct,    limit = sTP2, stop = shortSL, comment = "TP2")
+    strategy.exit("S-TP1", "Short", qty_percent = i_tp1Pct, limit = sTP1, stop = shortSL, comment = "TP1")
+    strategy.exit("S-TP2", "Short", qty_percent = tp2Pct,   limit = sTP2, stop = shortSL, comment = "TP2")
 
 // ===========================================================
 // VISUAL
