@@ -1,7 +1,7 @@
 //@version=6
 strategy(
      title             = "Market Structure Scalper",
-     shorttitle        = "MSS v1.0",
+     shorttitle        = "MSS v2.0",
      overlay           = true,
      pyramiding        = 0,
      default_qty_type  = strategy.percent_of_equity,
@@ -15,29 +15,68 @@ strategy(
 
 // --- INPUTS ---------------------------------------------------
 
-int   i_strLen     = input.int(20,    "Structure Lookback",  minval=5,   maxval=100, group="Structure")
-int   i_sweepWin   = input.int(3,     "Sweep Valid (bars)",  minval=1,   maxval=10,  group="Structure")
-int   i_atrLen     = input.int(14,    "ATR Length",          minval=2,               group="Risk")
-float i_atrSLMult  = input.float(0.5, "ATR SL Buffer",      minval=0.1, step=0.1,   group="Risk")
-float i_tp1R       = input.float(1.5, "TP1 R-Multiple",     minval=0.5, step=0.25,  group="Risk")
-float i_tp2R       = input.float(3.0, "TP2 R-Multiple",     minval=1.0, step=0.25,  group="Risk")
-float i_tp1Pct     = input.float(60.0,"% Exit at TP1",      minval=10,  maxval=90,  group="Risk")
-int   i_sesStart   = input.int(930,   "Session Start HHMM EST",         group="Session")
-int   i_sesEnd     = input.int(1130,  "Session End HHMM EST",           group="Session")
-bool  i_useSession = input.bool(true, "Filter to NY AM Session",        group="Session")
-bool  i_showDash   = input.bool(true, "Show Dashboard",                 group="Visual")
-bool  i_showLevels = input.bool(true, "Show SL / TP Lines",             group="Visual")
-bool  i_showStr    = input.bool(true, "Show Structure Levels",          group="Visual")
+int   i_strLen    = input.int(20,    "Structure Lookback",    minval=5,   maxval=100, group="Structure")
+int   i_sweepWin  = input.int(3,     "Sweep Valid (bars)",    minval=1,   maxval=10,  group="Structure")
 
-// --- TOOLS (ATR = SL sizing only, VWAP = session bias only) --
+bool  i_flowReq   = input.bool(true, "Require Delta Confirm",                        group="Order Flow")
+int   i_volLen    = input.int(20,    "Rel-Vol MA Length",     minval=5,   maxval=50,  group="Order Flow")
+float i_volMult   = input.float(1.0, "Min Vol Multiplier",    minval=0.5, step=0.1,  group="Order Flow")
+
+int   i_atrLen    = input.int(14,    "ATR Length",            minval=2,               group="Risk")
+float i_atrSLMult = input.float(0.5, "ATR SL Buffer",         minval=0.1, step=0.1,  group="Risk")
+float i_tp1R      = input.float(1.5, "TP1 R-Multiple",        minval=0.5, step=0.25, group="Risk")
+float i_tp2R      = input.float(3.0, "TP2 R-Multiple",        minval=1.0, step=0.25, group="Risk")
+float i_tp1Pct    = input.float(60.0,"% Exit at TP1",         minval=10,  maxval=90,  group="Risk")
+
+bool  i_nyAmOn    = input.bool(true,  "NY AM   (9:30-12:00 EST)", group="Sessions")
+bool  i_londonOn  = input.bool(true,  "London  (3:00-8:00 EST)",  group="Sessions")
+bool  i_nyPmOn    = input.bool(false, "NY PM   (1:30-4:00 EST)",  group="Sessions")
+bool  i_asianOn   = input.bool(false, "Asian   (7:00PM-4:00 EST)",group="Sessions")
+
+bool  i_showDash   = input.bool(true, "Show Dashboard",        group="Visual")
+bool  i_showLevels = input.bool(true, "Show SL / TP Lines",    group="Visual")
+bool  i_showStr    = input.bool(true, "Show Structure Levels",  group="Visual")
+
+// --- TOOLS ----------------------------------------------------
 
 float atrVal  = ta.atr(i_atrLen)
 float vwapVal = ta.vwap(hlc3)
 
-// --- SESSION --------------------------------------------------
+// --- SESSIONS -------------------------------------------------
 
-int  barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
-bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+int barHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+
+bool nyAmActive   = barHHMM >= 930  and barHHMM < 1200
+bool londonActive = barHHMM >= 300  and barHHMM < 800
+bool nyPmActive   = barHHMM >= 1330 and barHHMM < 1600
+bool asianActive  = barHHMM >= 1900 or  barHHMM < 400
+
+bool inSession = (i_nyAmOn   and nyAmActive)   or
+                 (i_londonOn and londonActive)  or
+                 (i_nyPmOn   and nyPmActive)    or
+                 (i_asianOn  and asianActive)
+
+// --- ORDER FLOW -----------------------------------------------
+
+// Estimated buy/sell volume from OHLCV (no external data needed)
+float barRange = high - low
+float buyVol   = barRange > 0.0 ? volume * (close - low)  / barRange : 0.0
+float sellVol  = barRange > 0.0 ? volume * (high - close) / barRange : 0.0
+float delta    = buyVol - sellVol
+
+// Cumulative volume delta - resets each new day
+bool  newDay   = dayofweek != dayofweek[1] or (hour(time) == 0 and minute(time) == 0)
+var float cvd  = 0.0
+cvd := newDay ? delta : cvd + delta
+
+// Relative volume
+float avgVol  = ta.sma(volume, i_volLen)
+float relVol  = avgVol > 0.0 ? volume / avgVol : 1.0
+bool  volOk   = relVol >= i_volMult
+
+// Order flow confirmation: buyers stepped in on bull sweep, sellers on bear sweep
+bool bullFlow = delta > 0.0 and volOk
+bool bearFlow = delta < 0.0 and volOk
 
 // --- MARKET STRUCTURE -----------------------------------------
 
@@ -45,7 +84,7 @@ bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesE
 float strHigh = ta.highest(high, i_strLen)[1]
 float strLow  = ta.lowest(low,   i_strLen)[1]
 
-// BOS: track which way structure last broke
+// BOS direction
 var int trend = 0
 if close > strHigh
     trend := 1
@@ -55,12 +94,10 @@ if close < strLow
 bool bullBOS = close > strHigh and close[1] <= strHigh
 bool bearBOS = close < strLow  and close[1] >= strLow
 
-// Liquidity sweep: wick pierces structure level, candle body reclaims it
-// This fires on the same bar as the event - zero lag
+// Liquidity sweep: wick pierces structure, body fully reclaims - fires same bar
 bool bullSweepBar = low < strLow  and close > strLow  and close > open
 bool bearSweepBar = high > strHigh and close < strHigh and close < open
 
-// Track actual sweep price for tight SL placement
 var float lastSweepLow  = na
 var float lastSweepHigh = na
 if bullSweepBar
@@ -68,7 +105,6 @@ if bullSweepBar
 if bearSweepBar
     lastSweepHigh := high
 
-// Count bars since last sweep without using ta.barssince (avoids na type issues)
 var int bullSweepAge = 99999
 var int bearSweepAge = 99999
 bullSweepAge := bullSweepBar ? 0 : bullSweepAge + 1
@@ -79,12 +115,12 @@ bool recentBearSweep = bearSweepAge <= i_sweepWin
 
 // --- SIGNALS --------------------------------------------------
 
-bool noPos = strategy.position_size == 0.0
+bool noPos       = strategy.position_size == 0.0
+bool flowOkLong  = not i_flowReq or bullFlow
+bool flowOkShort = not i_flowReq or bearFlow
 
-// Long:  stop hunt below structure lows, price reclaims -> buy the flush
-// Short: stop hunt above structure highs, price reclaims -> sell the spike
-bool longSignal  = inSession and recentBullSweep and close > vwapVal and trend >= 0 and noPos
-bool shortSignal = inSession and recentBearSweep and close < vwapVal and trend <= 0 and noPos
+bool longSignal  = inSession and recentBullSweep and close > vwapVal and trend >= 0 and flowOkLong  and noPos
+bool shortSignal = inSession and recentBearSweep and close < vwapVal and trend <= 0 and flowOkShort and noPos
 
 // --- SL / TP --------------------------------------------------
 
@@ -126,7 +162,13 @@ if strategy.position_size < 0.0 and not na(shortSL)
 
 // --- VISUALS --------------------------------------------------
 
-bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
+// Session background - NY AM takes priority in overlaps
+bgcolor(
+     nyAmActive   and i_nyAmOn   ? color.new(color.green,  93) :
+     londonActive and i_londonOn ? color.new(color.blue,   93) :
+     nyPmActive   and i_nyPmOn   ? color.new(color.orange, 93) :
+     asianActive  and i_asianOn  ? color.new(color.yellow, 93) : na,
+     title="Session BG")
 
 plot(i_showStr ? strHigh : na, "Struct High", color=color.new(color.red,  40), style=plot.style_stepline, linewidth=1)
 plot(i_showStr ? strLow  : na, "Struct Low",  color=color.new(color.lime, 40), style=plot.style_stepline, linewidth=1)
@@ -195,13 +237,23 @@ if i_showDash
     string pfStr  = strategy.grossloss != 0.0 ? str.tostring(math.round(pfRaw, 2)) : "N/A"
     string posStr = strategy.position_size > 0.0 ? "LONG" : strategy.position_size < 0.0 ? "SHORT" : "FLAT"
     string trStr  = trend == 1 ? "BULL" : trend == -1 ? "BEAR" : "NEUT"
+    string sesStr = nyAmActive   and i_nyAmOn   ? "NY AM"  :
+                    londonActive and i_londonOn ? "LONDON" :
+                    nyPmActive   and i_nyPmOn   ? "NY PM"  :
+                    asianActive  and i_asianOn  ? "ASIAN"  : "OFF"
     string swpStr = recentBullSweep ? "BULL" : recentBearSweep ? "BEAR" : "NONE"
+    string dltStr = delta > 0.0 ? "+" + str.tostring(math.round(delta, 0)) : str.tostring(math.round(delta, 0))
+    string volStr = str.tostring(math.round(relVol, 2)) + "x"
+    string cvdStr = cvd > 0.0 ? "+" + str.tostring(math.round(cvd, 0)) : str.tostring(math.round(cvd, 0))
 
-    string dash = "=== MSS v1.0 ===\n" +
-         "Session : " + (inSession ? "ACTIVE" : "OFF") + "\n" +
+    string dash = "=== MSS v2.0 ===\n" +
+         "Session : " + sesStr + "\n" +
          "BOS     : " + trStr + "\n" +
          "VWAP    : " + (close > vwapVal ? "ABOVE" : "BELOW") + "\n" +
          "Sweep   : " + swpStr + "\n" +
+         "Delta   : " + dltStr + "\n" +
+         "CVD     : " + cvdStr + "\n" +
+         "Volume  : " + volStr + "\n" +
          "Position: " + posStr + "\n" +
          "----------------\n" +
          "Trades  : " + str.tostring(tot) + "\n" +
@@ -217,9 +269,9 @@ if i_showDash
 
 // --- ALERTS ---------------------------------------------------
 
-alertcondition(longSignal,   title="MSS Long",        message="MSS Long  | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(shortSignal,  title="MSS Short",       message="MSS Short | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(bullSweepBar, title="Bull Sweep",      message="Bull liquidity sweep | {{ticker}} @ {{close}}")
-alertcondition(bearSweepBar, title="Bear Sweep",      message="Bear liquidity sweep | {{ticker}} @ {{close}}")
-alertcondition(bullBOS,      title="Bull BOS",        message="Bullish BOS | {{ticker}} @ {{close}}")
-alertcondition(bearBOS,      title="Bear BOS",        message="Bearish BOS | {{ticker}} @ {{close}}")
+alertcondition(longSignal,   title="MSS Long",   message="MSS Long  | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(shortSignal,  title="MSS Short",  message="MSS Short | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bullSweepBar, title="Bull Sweep", message="Bull liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweepBar, title="Bear Sweep", message="Bear liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bullBOS,      title="Bull BOS",   message="Bullish BOS | {{ticker}} @ {{close}}")
+alertcondition(bearBOS,      title="Bear BOS",   message="Bearish BOS | {{ticker}} @ {{close}}")
