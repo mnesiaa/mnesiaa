@@ -1,7 +1,7 @@
 //@version=6
 strategy(
      title             = "Market Structure Scalper",
-     shorttitle        = "MSS v2.0",
+     shorttitle        = "MSS v3.0",
      overlay           = true,
      pyramiding        = 0,
      default_qty_type  = strategy.percent_of_equity,
@@ -13,78 +13,240 @@ strategy(
      calc_on_every_tick      = false,
      process_orders_on_close = true)
 
-// --- INPUTS ---------------------------------------------------
+// ============================================================
+// CUSTOM TYPES
+// ============================================================
 
-int   i_strLen    = input.int(20,    "Structure Lookback",    minval=5,   maxval=100, group="Structure")
-int   i_sweepWin  = input.int(3,     "Sweep Valid (bars)",    minval=1,   maxval=10,  group="Structure")
+type levelData
+    float hi
+    float lo
+    float mid
+    int   startBar
+    line  hiLine
+    line  loLine
+    line  midLine
+    label hiLabel
+    label loLabel
+    label midLabel
+    box   sessionBox
 
+type fvgData
+    float top
+    float bot
+    bool  isBull
+    box   area
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+lineStyleOf(simple string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+labelSizeOf(simple string s) =>
+    s == "Small" ? size.small : s == "Normal" ? size.normal : size.tiny
+
+tfLabel(simple string tf) =>
+    switch tf
+        "1"   => "1m"
+        "3"   => "3m"
+        "5"   => "5m"
+        "15"  => "15m"
+        "30"  => "30m"
+        "60"  => "1H"
+        "120" => "2H"
+        "240" => "4H"
+        "D"   => "1D"
+        "W"   => "1W"
+        => tf
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+// Structure
+int   i_strLen    = input.int(20,    "Structure Lookback",  minval=5,   maxval=100, group="Structure")
+int   i_sweepWin  = input.int(3,     "Sweep Valid (bars)",  minval=1,   maxval=10,  group="Structure")
+
+// Order Flow
 bool  i_flowReq   = input.bool(true, "Require Delta Confirm",                        group="Order Flow")
-int   i_volLen    = input.int(20,    "Rel-Vol MA Length",     minval=5,   maxval=50,  group="Order Flow")
-float i_volMult   = input.float(1.0, "Min Vol Multiplier",    minval=0.5, step=0.1,  group="Order Flow")
+int   i_volLen    = input.int(20,    "Rel-Vol MA Length",   minval=5,   maxval=50,   group="Order Flow")
+float i_volMult   = input.float(1.0, "Min Vol Multiplier",  minval=0.5, step=0.1,   group="Order Flow")
 
-int   i_atrLen    = input.int(14,    "ATR Length",            minval=2,               group="Risk")
-float i_atrSLMult = input.float(0.5, "ATR SL Buffer",         minval=0.1, step=0.1,  group="Risk")
-float i_tp1R      = input.float(1.5, "TP1 R-Multiple",        minval=0.5, step=0.25, group="Risk")
-float i_tp2R      = input.float(3.0, "TP2 R-Multiple",        minval=1.0, step=0.25, group="Risk")
-float i_tp1Pct    = input.float(60.0,"% Exit at TP1",         minval=10,  maxval=90,  group="Risk")
+// Risk
+int   i_atrLen    = input.int(14,    "ATR Length",          minval=2,               group="Risk")
+float i_atrSLMult = input.float(0.5, "ATR SL Buffer",       minval=0.1, step=0.1,  group="Risk")
+float i_tp1R      = input.float(1.5, "TP1 R-Multiple",      minval=0.5, step=0.25, group="Risk")
+float i_tp2R      = input.float(3.0, "TP2 R-Multiple",      minval=1.0, step=0.25, group="Risk")
+float i_tp1Pct    = input.float(60.0,"% Exit at TP1",       minval=10,  maxval=90,  group="Risk")
 
-bool  i_nyAmOn    = input.bool(true,  "NY AM   (9:30-12:00 EST)", group="Sessions")
-bool  i_londonOn  = input.bool(true,  "London  (3:00-8:00 EST)",  group="Sessions")
-bool  i_nyPmOn    = input.bool(false, "NY PM   (1:30-4:00 EST)",  group="Sessions")
-bool  i_asianOn   = input.bool(false, "Asian   (7:00PM-4:00 EST)",group="Sessions")
+// Session Mode
+string i_sesMode  = input.string("Full Sessions", "Mode", options=["Kill Zones","Full Sessions"], group="Session Mode")
 
-bool  i_showDash   = input.bool(true, "Show Dashboard",        group="Visual")
-bool  i_showLevels = input.bool(true, "Show SL / TP Lines",    group="Visual")
-bool  i_showStr    = input.bool(true, "Show Structure Levels",  group="Visual")
+// Active Sessions for trade signals
+bool  i_nyAmOn    = input.bool(true,  "NY AM   (9:30-12:00 EST)",  group="Sessions")
+bool  i_londonOn  = input.bool(true,  "London  (3:00-8:00 EST)",   group="Sessions")
+bool  i_nyPmOn    = input.bool(false, "NY PM   (1:30-4:00 EST)",   group="Sessions")
+bool  i_asianOn   = input.bool(false, "Asian   (7PM-4:00 EST)",    group="Sessions")
 
-// --- TOOLS ----------------------------------------------------
+// Previous Day H/L
+bool   i_showPD      = input.bool(true, "Show PDH/PDL",      group="Previous Day")
+string i_pdSrc       = input.string("RTH Only", "Source", options=["RTH Only","Full Session"], group="Previous Day")
+int    i_pdHistory   = input.int(1,  "Days to Show",         minval=0, maxval=5,   group="Previous Day")
+int    i_pdWidth     = input.int(1,  "Line Thickness",       minval=1, maxval=5,   group="Previous Day")
+color  i_pdColor     = input.color(color.new(color.yellow, 0), "Color",            group="Previous Day")
+
+// Asian Session
+bool   i_showAsian   = input.bool(true,  "Show Asian H/L",   group="Asian Session")
+bool   i_asianBox    = input.bool(true,  "Show Session Box", group="Asian Session")
+bool   i_asianMid    = input.bool(false, "Show Midline",     group="Asian Session")
+bool   i_asianExtend = input.bool(true,  "Extend Lines",     group="Asian Session")
+int    i_asianExtTo  = input.int(1130,   "Extend Until (HHMM EST)", minval=0, maxval=2359, group="Asian Session")
+int    i_asianHist   = input.int(1,      "Days to Show",     minval=0, maxval=5,   group="Asian Session")
+int    i_asianWidth  = input.int(1,      "Line Thickness",   minval=1, maxval=5,   group="Asian Session")
+color  i_asianColor  = input.color(color.new(color.purple, 0),  "Color",           group="Asian Session")
+color  i_asianBoxCol = input.color(color.new(color.purple, 90), "Box Fill",        group="Asian Session")
+
+// London Session
+bool   i_showLondon  = input.bool(true,  "Show London H/L",  group="London Session")
+bool   i_londonBox   = input.bool(true,  "Show Session Box", group="London Session")
+bool   i_londonMid   = input.bool(false, "Show Midline",     group="London Session")
+bool   i_londonExtend= input.bool(true,  "Extend Lines",     group="London Session")
+int    i_londonExtTo = input.int(1130,   "Extend Until (HHMM EST)", minval=0, maxval=2359, group="London Session")
+int    i_londonHist  = input.int(1,      "Days to Show",     minval=0, maxval=5,   group="London Session")
+int    i_londonWidth = input.int(1,      "Line Thickness",   minval=1, maxval=5,   group="London Session")
+color  i_londonColor = input.color(color.new(color.orange, 0),  "Color",           group="London Session")
+color  i_londonBoxCol= input.color(color.new(color.orange, 90), "Box Fill",        group="London Session")
+
+// Fair Value Gaps
+bool   i_showFVG    = input.bool(true, "Show FVGs",              group="Fair Value Gaps")
+bool   i_fvgMitig   = input.bool(true, "Remove When Mitigated",  group="Fair Value Gaps")
+int    i_fvgExtend  = input.int(50,   "Extend Bars",             minval=5, maxval=200, group="Fair Value Gaps")
+color  i_bullFVG    = input.color(color.new(#089981, 70), "Bullish FVG",             group="Fair Value Gaps")
+color  i_bearFVG    = input.color(color.new(#f23645, 70), "Bearish FVG",             group="Fair Value Gaps")
+
+// HTF Bias
+bool   i_showDash   = input.bool(true,  "Show Dashboard",         group="HTF Bias")
+string i_htf1       = input.timeframe("240", "Timeframe 1",       group="HTF Bias")
+string i_htf2       = input.timeframe("60",  "Timeframe 2",       group="HTF Bias")
+int    i_swingLen   = input.int(10, "Swing Lookback",             minval=3, maxval=50,  group="HTF Bias")
+string i_dashPos    = input.string("Top Right", "Position",
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"], group="HTF Bias")
+
+// Dashboard Colors
+color  i_dashBg     = input.color(color.new(#0d1117, 10), "Background",  group="Dashboard Colors")
+color  i_dashBdr    = input.color(color.new(color.gray, 70), "Border",   group="Dashboard Colors")
+color  i_dashHdrBg  = input.color(color.new(#2962ff, 70), "Header BG",  group="Dashboard Colors")
+color  i_dashHdrTxt = input.color(color.white,   "Header Text",          group="Dashboard Colors")
+color  i_dashLbl    = input.color(color.gray,    "Labels",               group="Dashboard Colors")
+color  i_dashBull   = input.color(color.green,   "Bullish",              group="Dashboard Colors")
+color  i_dashBear   = input.color(color.red,     "Bearish",              group="Dashboard Colors")
+color  i_dashNeut   = input.color(color.gray,    "Neutral",              group="Dashboard Colors")
+
+// Style
+string i_lineStyle  = input.string("Solid", "Line Style",
+     options=["Solid","Dashed","Dotted"],                                 group="Style")
+bool   i_showLabels = input.bool(true, "Show Labels",                    group="Style")
+string i_labelSize  = input.string("Tiny", "Label Size",
+     options=["Tiny","Small","Normal"],                                   group="Style")
+bool   i_showLevels = input.bool(true, "Show SL / TP Lines",             group="Style")
+bool   i_showStr    = input.bool(true, "Show Structure Levels",          group="Style")
+
+// ============================================================
+// STATE VARIABLES
+// ============================================================
+
+var levelData[] pdArr     = array.new<levelData>()
+var levelData[] asianArr  = array.new<levelData>()
+var levelData[] londonArr = array.new<levelData>()
+var fvgData[]   fvgArr    = array.new<fvgData>()
+
+// PD tracking
+var float pdTrackHi = na
+var float pdTrackLo = na
+
+// Asian tracking
+var float asianHi   = na
+var float asianLo   = na
+var int   asianHiB  = na
+var int   asianLoB  = na
+var int   asianStB  = na
+var bool  asianBldg = false
+var box   asianBox_ = na
+
+// London tracking
+var float londonHi  = na
+var float londonLo  = na
+var int   londonHiB = na
+var int   londonLoB = na
+var int   londonStB = na
+var bool  londonBldg= false
+var box   londonBox_= na
+
+// HTF bias tracking
+var float htf1LastHi = na
+var float htf1PrevHi = na
+var float htf1LastLo = na
+var float htf1PrevLo = na
+var float htf2LastHi = na
+var float htf2PrevHi = na
+var float htf2LastLo = na
+var float htf2PrevLo = na
+
+// ============================================================
+// TOOLS
+// ============================================================
 
 float atrVal  = ta.atr(i_atrLen)
 float vwapVal = ta.vwap(hlc3)
 
-// --- SESSIONS -------------------------------------------------
+// ============================================================
+// SESSION DETECTION
+// ============================================================
 
-int barHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+bool newDay    = dayofweek != dayofweek[1]
+int  barHHMM  = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
 
-bool nyAmActive   = barHHMM >= 930  and barHHMM < 1200
-bool londonActive = barHHMM >= 300  and barHHMM < 800
-bool nyPmActive   = barHHMM >= 1330 and barHHMM < 1600
-bool asianActive  = barHHMM >= 1900 or  barHHMM < 400
+// Trade signal sessions
+bool nyAmSig  = barHHMM >= 930  and barHHMM < 1200
+bool londonSig= i_sesMode == "Kill Zones" ? (barHHMM >= 200 and barHHMM < 500) : (barHHMM >= 300 and barHHMM < 800)
+bool nyPmSig  = barHHMM >= 1330 and barHHMM < 1600
+bool asianSig = barHHMM >= 1900 or  barHHMM < 400
 
-bool inSession = (i_nyAmOn   and nyAmActive)   or
-                 (i_londonOn and londonActive)  or
-                 (i_nyPmOn   and nyPmActive)    or
-                 (i_asianOn  and asianActive)
+bool inSession = (i_nyAmOn and nyAmSig) or (i_londonOn and londonSig) or
+                 (i_nyPmOn and nyPmSig) or (i_asianOn  and asianSig)
 
-// --- ORDER FLOW -----------------------------------------------
+// Drawing sessions
+bool inAsianSes  = i_sesMode == "Kill Zones" ? (barHHMM >= 2000 or barHHMM < 100) : (barHHMM >= 1900 or barHHMM < 400)
+bool inLondonSes = i_sesMode == "Kill Zones" ? (barHHMM >= 200 and barHHMM < 500) : (barHHMM >= 300 and barHHMM < 800)
+bool inPDSes     = i_pdSrc == "RTH Only" ? (barHHMM >= 930 and barHHMM < 1600) : (barHHMM >= 1800 or barHHMM < 1700)
 
-// Estimated buy/sell volume from OHLCV (no external data needed)
+// ============================================================
+// ORDER FLOW
+// ============================================================
+
 float barRange = high - low
 float buyVol   = barRange > 0.0 ? volume * (close - low)  / barRange : 0.0
 float sellVol  = barRange > 0.0 ? volume * (high - close) / barRange : 0.0
 float delta    = buyVol - sellVol
 
-// Cumulative volume delta - resets each new day
-bool  newDay   = dayofweek != dayofweek[1] or (hour(time) == 0 and minute(time) == 0)
 var float cvd  = 0.0
 cvd := newDay ? delta : cvd + delta
 
-// Relative volume
 float avgVol  = ta.sma(volume, i_volLen)
 float relVol  = avgVol > 0.0 ? volume / avgVol : 1.0
 bool  volOk   = relVol >= i_volMult
 
-// Order flow confirmation: buyers stepped in on bull sweep, sellers on bear sweep
 bool bullFlow = delta > 0.0 and volOk
 bool bearFlow = delta < 0.0 and volOk
 
-// --- MARKET STRUCTURE -----------------------------------------
+// ============================================================
+// MARKET STRUCTURE
+// ============================================================
 
-// [1] offset = confirmed bars only, never repaints
 float strHigh = ta.highest(high, i_strLen)[1]
 float strLow  = ta.lowest(low,   i_strLen)[1]
 
-// BOS direction
 var int trend = 0
 if close > strHigh
     trend := 1
@@ -94,16 +256,15 @@ if close < strLow
 bool bullBOS = close > strHigh and close[1] <= strHigh
 bool bearBOS = close < strLow  and close[1] >= strLow
 
-// Liquidity sweep: wick pierces structure, body fully reclaims - fires same bar
 bool bullSweepBar = low < strLow  and close > strLow  and close > open
 bool bearSweepBar = high > strHigh and close < strHigh and close < open
 
-var float lastSweepLow  = na
-var float lastSweepHigh = na
+var float lastSweepLo = na
+var float lastSweepHi = na
 if bullSweepBar
-    lastSweepLow  := low
+    lastSweepLo := low
 if bearSweepBar
-    lastSweepHigh := high
+    lastSweepHi := high
 
 var int bullSweepAge = 99999
 var int bearSweepAge = 99999
@@ -113,7 +274,9 @@ bearSweepAge := bearSweepBar ? 0 : bearSweepAge + 1
 bool recentBullSweep = bullSweepAge <= i_sweepWin
 bool recentBearSweep = bearSweepAge <= i_sweepWin
 
-// --- SIGNALS --------------------------------------------------
+// ============================================================
+// SIGNALS
+// ============================================================
 
 bool noPos       = strategy.position_size == 0.0
 bool flowOkLong  = not i_flowReq or bullFlow
@@ -122,7 +285,9 @@ bool flowOkShort = not i_flowReq or bearFlow
 bool longSignal  = inSession and recentBullSweep and close > vwapVal and trend >= 0 and flowOkLong  and noPos
 bool shortSignal = inSession and recentBearSweep and close < vwapVal and trend <= 0 and flowOkShort and noPos
 
-// --- SL / TP --------------------------------------------------
+// ============================================================
+// SL / TP
+// ============================================================
 
 var float longSL   = na
 var float longTP1  = na
@@ -132,16 +297,18 @@ var float shortTP1 = na
 var float shortTP2 = na
 
 if longSignal
-    longSL  := nz(lastSweepLow, strLow) - atrVal * i_atrSLMult
+    longSL  := nz(lastSweepLo, strLow) - atrVal * i_atrSLMult
     longTP1 := close + (close - longSL) * i_tp1R
     longTP2 := close + (close - longSL) * i_tp2R
 
 if shortSignal
-    shortSL  := nz(lastSweepHigh, strHigh) + atrVal * i_atrSLMult
+    shortSL  := nz(lastSweepHi, strHigh) + atrVal * i_atrSLMult
     shortTP1 := close - (shortSL - close) * i_tp1R
     shortTP2 := close - (shortSL - close) * i_tp2R
 
-// --- EXECUTION ------------------------------------------------
+// ============================================================
+// EXECUTION
+// ============================================================
 
 float tp1Qty = i_tp1Pct
 float tp2Qty = 100.0 - i_tp1Pct
@@ -160,14 +327,256 @@ if strategy.position_size < 0.0 and not na(shortSL)
     strategy.exit("S-TP1", "Short", qty_percent=tp1Qty, limit=shortTP1, stop=shortSL, comment="TP1")
     strategy.exit("S-TP2", "Short", qty_percent=tp2Qty, limit=shortTP2, stop=shortSL, comment="TP2")
 
-// --- VISUALS --------------------------------------------------
+// ============================================================
+// PDH / PDL
+// ============================================================
 
-// Session background - NY AM takes priority in overlaps
+if newDay and i_showPD and not na(pdTrackHi) and i_pdHistory > 0
+    int extX       = bar_index + 100
+    line hiLine    = line.new(bar_index, pdTrackHi, extX, pdTrackHi, color=i_pdColor, style=lineStyleOf(i_lineStyle), width=i_pdWidth)
+    line loLine    = line.new(bar_index, pdTrackLo, extX, pdTrackLo, color=i_pdColor, style=lineStyleOf(i_lineStyle), width=i_pdWidth)
+    label hiLabel  = i_showLabels ? label.new(extX + 2, pdTrackHi, "PDH", style=label.style_none, textcolor=i_pdColor, size=labelSizeOf(i_labelSize)) : na
+    label loLabel  = i_showLabels ? label.new(extX + 2, pdTrackLo, "PDL", style=label.style_none, textcolor=i_pdColor, size=labelSizeOf(i_labelSize)) : na
+    levelData newPD = levelData.new(pdTrackHi, pdTrackLo, na, bar_index, hiLine, loLine, na, hiLabel, loLabel, na, na)
+    array.unshift(pdArr, newPD)
+    if array.size(pdArr) > i_pdHistory
+        levelData old = array.pop(pdArr)
+        line.delete(old.hiLine)
+        line.delete(old.loLine)
+        label.delete(old.hiLabel)
+        label.delete(old.loLabel)
+
+if newDay
+    pdTrackHi := na
+    pdTrackLo := na
+
+if inPDSes
+    pdTrackHi := na(pdTrackHi) ? high : math.max(pdTrackHi, high)
+    pdTrackLo := na(pdTrackLo) ? low  : math.min(pdTrackLo, low)
+
+if array.size(pdArr) > 0
+    for i = 0 to array.size(pdArr) - 1
+        levelData lvl = array.get(pdArr, i)
+        line.set_x2(lvl.hiLine, bar_index + 20)
+        line.set_x2(lvl.loLine, bar_index + 20)
+        if i == 0 and i_showLabels
+            label.set_x(lvl.hiLabel, bar_index + 22)
+            label.set_x(lvl.loLabel, bar_index + 22)
+
+// ============================================================
+// ASIAN SESSION BOX + H/L
+// ============================================================
+
+if inAsianSes
+    if not inAsianSes[1]
+        asianHi   := high
+        asianLo   := low
+        asianHiB  := bar_index
+        asianLoB  := bar_index
+        asianStB  := bar_index
+        asianBldg := true
+        if i_asianBox and i_showAsian
+            box.delete(asianBox_)
+            asianBox_ := box.new(bar_index, high, bar_index, low, border_color=i_asianColor, bgcolor=i_asianBoxCol, border_width=1)
+    else
+        if high > asianHi
+            asianHi  := high
+            asianHiB := bar_index
+        if low < asianLo
+            asianLo  := low
+            asianLoB := bar_index
+        if i_asianBox and i_showAsian and not na(asianBox_)
+            box.set_top(asianBox_, asianHi)
+            box.set_bottom(asianBox_, asianLo)
+            box.set_right(asianBox_, bar_index)
+
+if not inAsianSes and inAsianSes[1] and asianBldg and i_showAsian and i_asianHist > 0 and not na(asianHi)
+    asianBldg     := false
+    float asianMid = (asianHi + asianLo) / 2.0
+    int   extX     = bar_index + 100
+    line  hiLine   = line.new(asianHiB, asianHi, extX, asianHi, color=i_asianColor, style=lineStyleOf(i_lineStyle), width=i_asianWidth)
+    line  loLine   = line.new(asianLoB, asianLo, extX, asianLo, color=i_asianColor, style=lineStyleOf(i_lineStyle), width=i_asianWidth)
+    line  midLine  = i_asianMid ? line.new(asianStB, asianMid, extX, asianMid, color=color.new(i_asianColor, 50), style=line.style_dotted, width=math.max(1, i_asianWidth - 1)) : na
+    label hiLabel  = i_showLabels ? label.new(extX + 2, asianHi, "ASIA H", style=label.style_none, textcolor=i_asianColor, size=labelSizeOf(i_labelSize)) : na
+    label loLabel  = i_showLabels ? label.new(extX + 2, asianLo, "ASIA L", style=label.style_none, textcolor=i_asianColor, size=labelSizeOf(i_labelSize)) : na
+    label midLabel = i_showLabels and i_asianMid ? label.new(extX + 2, asianMid, "ASIA M", style=label.style_none, textcolor=color.new(i_asianColor, 50), size=labelSizeOf(i_labelSize)) : na
+    levelData newLvl = levelData.new(asianHi, asianLo, asianMid, asianStB, hiLine, loLine, midLine, hiLabel, loLabel, midLabel, asianBox_)
+    array.unshift(asianArr, newLvl)
+    if array.size(asianArr) > i_asianHist
+        levelData old = array.pop(asianArr)
+        line.delete(old.hiLine)
+        line.delete(old.loLine)
+        line.delete(old.midLine)
+        label.delete(old.hiLabel)
+        label.delete(old.loLabel)
+        label.delete(old.midLabel)
+        box.delete(old.sessionBox)
+
+if array.size(asianArr) > 0
+    for i = 0 to array.size(asianArr) - 1
+        levelData lvl = array.get(asianArr, i)
+        bool ext = i == 0 and i_asianExtend and barHHMM < i_asianExtTo
+        int  x2  = ext ? bar_index + 20 : bar_index
+        line.set_x2(lvl.hiLine, x2)
+        line.set_x2(lvl.loLine, x2)
+        if i_asianMid and not na(lvl.midLine)
+            line.set_x2(lvl.midLine, x2)
+        if i == 0 and i_showLabels
+            label.set_x(lvl.hiLabel, x2 + 2)
+            label.set_x(lvl.loLabel, x2 + 2)
+            if i_asianMid and not na(lvl.midLabel)
+                label.set_x(lvl.midLabel, x2 + 2)
+
+// ============================================================
+// LONDON SESSION BOX + H/L
+// ============================================================
+
+if inLondonSes
+    if not inLondonSes[1]
+        londonHi   := high
+        londonLo   := low
+        londonHiB  := bar_index
+        londonLoB  := bar_index
+        londonStB  := bar_index
+        londonBldg := true
+        if i_londonBox and i_showLondon
+            box.delete(londonBox_)
+            londonBox_ := box.new(bar_index, high, bar_index, low, border_color=i_londonColor, bgcolor=i_londonBoxCol, border_width=1)
+    else
+        if high > londonHi
+            londonHi  := high
+            londonHiB := bar_index
+        if low < londonLo
+            londonLo  := low
+            londonLoB := bar_index
+        if i_londonBox and i_showLondon and not na(londonBox_)
+            box.set_top(londonBox_, londonHi)
+            box.set_bottom(londonBox_, londonLo)
+            box.set_right(londonBox_, bar_index)
+
+if not inLondonSes and inLondonSes[1] and londonBldg and i_showLondon and i_londonHist > 0 and not na(londonHi)
+    londonBldg      := false
+    float londonMid  = (londonHi + londonLo) / 2.0
+    int   extX       = bar_index + 100
+    line  hiLine     = line.new(londonHiB, londonHi, extX, londonHi, color=i_londonColor, style=lineStyleOf(i_lineStyle), width=i_londonWidth)
+    line  loLine     = line.new(londonLoB, londonLo, extX, londonLo, color=i_londonColor, style=lineStyleOf(i_lineStyle), width=i_londonWidth)
+    line  midLine    = i_londonMid ? line.new(londonStB, londonMid, extX, londonMid, color=color.new(i_londonColor, 50), style=line.style_dotted, width=math.max(1, i_londonWidth - 1)) : na
+    label hiLabel    = i_showLabels ? label.new(extX + 2, londonHi, "LDN H", style=label.style_none, textcolor=i_londonColor, size=labelSizeOf(i_labelSize)) : na
+    label loLabel    = i_showLabels ? label.new(extX + 2, londonLo, "LDN L", style=label.style_none, textcolor=i_londonColor, size=labelSizeOf(i_labelSize)) : na
+    label midLabel   = i_showLabels and i_londonMid ? label.new(extX + 2, londonMid, "LDN M", style=label.style_none, textcolor=color.new(i_londonColor, 50), size=labelSizeOf(i_labelSize)) : na
+    levelData newLvl = levelData.new(londonHi, londonLo, londonMid, londonStB, hiLine, loLine, midLine, hiLabel, loLabel, midLabel, londonBox_)
+    array.unshift(londonArr, newLvl)
+    if array.size(londonArr) > i_londonHist
+        levelData old = array.pop(londonArr)
+        line.delete(old.hiLine)
+        line.delete(old.loLine)
+        line.delete(old.midLine)
+        label.delete(old.hiLabel)
+        label.delete(old.loLabel)
+        label.delete(old.midLabel)
+        box.delete(old.sessionBox)
+
+if array.size(londonArr) > 0
+    for i = 0 to array.size(londonArr) - 1
+        levelData lvl = array.get(londonArr, i)
+        bool ext = i == 0 and i_londonExtend and barHHMM < i_londonExtTo
+        int  x2  = ext ? bar_index + 20 : bar_index
+        line.set_x2(lvl.hiLine, x2)
+        line.set_x2(lvl.loLine, x2)
+        if i_londonMid and not na(lvl.midLine)
+            line.set_x2(lvl.midLine, x2)
+        if i == 0 and i_showLabels
+            label.set_x(lvl.hiLabel, x2 + 2)
+            label.set_x(lvl.loLabel, x2 + 2)
+            if i_londonMid and not na(lvl.midLabel)
+                label.set_x(lvl.midLabel, x2 + 2)
+
+// ============================================================
+// FAIR VALUE GAPS
+// ============================================================
+
+if i_showFVG
+    bool bullFVG = low > high[2] and close[1] > high[2]
+    bool bearFVG = high < low[2] and close[1] < low[2]
+
+    if bullFVG
+        box bx      = box.new(bar_index - 2, low, bar_index + i_fvgExtend, high[2], na, bgcolor=i_bullFVG)
+        fvgData nf  = fvgData.new(low, high[2], true, bx)
+        array.unshift(fvgArr, nf)
+
+    if bearFVG
+        box bx      = box.new(bar_index - 2, low[2], bar_index + i_fvgExtend, high, na, bgcolor=i_bearFVG)
+        fvgData nf  = fvgData.new(low[2], high, false, bx)
+        array.unshift(fvgArr, nf)
+
+    if i_fvgMitig and array.size(fvgArr) > 0
+        for i = array.size(fvgArr) - 1 to 0
+            fvgData f   = array.get(fvgArr, i)
+            bool mitig  = f.isBull ? close < f.bot : close > f.top
+            if mitig
+                box.delete(f.area)
+                array.remove(fvgArr, i)
+
+    while array.size(fvgArr) > 100
+        fvgData old = array.pop(fvgArr)
+        box.delete(old.area)
+
+// ============================================================
+// HTF BIAS
+// ============================================================
+
+[htf1Hi, htf1Lo] = request.security(syminfo.tickerid, i_htf1, [high, low])
+[htf2Hi, htf2Lo] = request.security(syminfo.tickerid, i_htf2, [high, low])
+
+float htf1SwHi = ta.pivothigh(htf1Hi, i_swingLen, i_swingLen)
+float htf1SwLo = ta.pivotlow(htf1Lo,  i_swingLen, i_swingLen)
+float htf2SwHi = ta.pivothigh(htf2Hi, i_swingLen, i_swingLen)
+float htf2SwLo = ta.pivotlow(htf2Lo,  i_swingLen, i_swingLen)
+
+if not na(htf1SwHi)
+    htf1PrevHi := htf1LastHi
+    htf1LastHi := htf1SwHi
+if not na(htf1SwLo)
+    htf1PrevLo := htf1LastLo
+    htf1LastLo := htf1SwLo
+if not na(htf2SwHi)
+    htf2PrevHi := htf2LastHi
+    htf2LastHi := htf2SwHi
+if not na(htf2SwLo)
+    htf2PrevLo := htf2LastLo
+    htf2LastLo := htf2SwLo
+
+bool htf1HH   = not na(htf1LastHi) and not na(htf1PrevHi) and htf1LastHi > htf1PrevHi
+bool htf1LH   = not na(htf1LastHi) and not na(htf1PrevHi) and htf1LastHi < htf1PrevHi
+bool htf1HL   = not na(htf1LastLo) and not na(htf1PrevLo) and htf1LastLo > htf1PrevLo
+bool htf1LL   = not na(htf1LastLo) and not na(htf1PrevLo) and htf1LastLo < htf1PrevLo
+bool htf1Bull = htf1HH and htf1HL
+bool htf1Bear = htf1LH and htf1LL
+
+bool htf2HH   = not na(htf2LastHi) and not na(htf2PrevHi) and htf2LastHi > htf2PrevHi
+bool htf2LH   = not na(htf2LastHi) and not na(htf2PrevHi) and htf2LastHi < htf2PrevHi
+bool htf2HL   = not na(htf2LastLo) and not na(htf2PrevLo) and htf2LastLo > htf2PrevLo
+bool htf2LL   = not na(htf2LastLo) and not na(htf2PrevLo) and htf2LastLo < htf2PrevLo
+bool htf2Bull = htf2HH and htf2HL
+bool htf2Bear = htf2LH and htf2LL
+
+string htf1Bias  = htf1Bull ? "BULLISH" : htf1Bear ? "BEARISH" : "NEUTRAL"
+color  htf1Col   = htf1Bull ? i_dashBull : htf1Bear ? i_dashBear : i_dashNeut
+string htf1Struc = (htf1HH ? "HH" : htf1LH ? "LH" : "-") + "/" + (htf1HL ? "HL" : htf1LL ? "LL" : "-")
+
+string htf2Bias  = htf2Bull ? "BULLISH" : htf2Bear ? "BEARISH" : "NEUTRAL"
+color  htf2Col   = htf2Bull ? i_dashBull : htf2Bear ? i_dashBear : i_dashNeut
+string htf2Struc = (htf2HH ? "HH" : htf2LH ? "LH" : "-") + "/" + (htf2HL ? "HL" : htf2LL ? "LL" : "-")
+
+// ============================================================
+// CHART VISUALS
+// ============================================================
+
 bgcolor(
-     nyAmActive   and i_nyAmOn   ? color.new(color.green,  93) :
-     londonActive and i_londonOn ? color.new(color.blue,   93) :
-     nyPmActive   and i_nyPmOn   ? color.new(color.orange, 93) :
-     asianActive  and i_asianOn  ? color.new(color.yellow, 93) : na,
+     nyAmSig  and i_nyAmOn   ? color.new(color.green,  95) :
+     londonSig and i_londonOn ? color.new(color.blue,   95) :
+     nyPmSig  and i_nyPmOn   ? color.new(color.orange, 95) :
+     asianSig  and i_asianOn  ? color.new(color.yellow, 95) : na,
      title="Session BG")
 
 plot(i_showStr ? strHigh : na, "Struct High", color=color.new(color.red,  40), style=plot.style_stepline, linewidth=1)
@@ -178,16 +587,14 @@ plotshape(bullSweepBar, location=location.belowbar, style=shape.circle,
      color=color.new(color.lime, 20), size=size.tiny, title="Bull Sweep")
 plotshape(bearSweepBar, location=location.abovebar, style=shape.circle,
      color=color.new(color.red,  20), size=size.tiny, title="Bear Sweep")
-
 plotshape(bullBOS, location=location.abovebar, style=shape.labelup,
      color=color.new(color.lime, 0), textcolor=color.black, text="BOS", size=size.tiny, title="Bull BOS")
 plotshape(bearBOS, location=location.belowbar, style=shape.labeldown,
      color=color.new(color.red,  0), textcolor=color.white, text="BOS", size=size.tiny, title="Bear BOS")
-
 plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
-     color=color.new(color.lime, 0), size=size.normal, title="Long Signal")
+     color=color.new(color.lime, 0), size=size.normal, text="MSS LONG",  textcolor=color.lime, title="Long Signal")
 plotshape(shortSignal, location=location.abovebar, style=shape.triangledown,
-     color=color.new(color.red,  0), size=size.normal, title="Short Signal")
+     color=color.new(color.red,  0), size=size.normal, text="MSS SHORT", textcolor=color.red,  title="Short Signal")
 
 // SL / TP lines - delete old before drawing new
 var line  lvl_sl  = na
@@ -209,9 +616,10 @@ if i_showLevels and longSignal and not na(longSL)
     lvl_sl  := line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
     lvl_tp1 := line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
     lvl_tp2 := line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    lbl_sl  := label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lbl_tp1 := label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lbl_tp2 := label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if i_showLabels
+        lbl_sl  := label.new(lineEnd + 2, longSL,  "SL",  style=label.style_none, textcolor=color.red,   size=labelSizeOf(i_labelSize))
+        lbl_tp1 := label.new(lineEnd + 2, longTP1, "TP1", style=label.style_none, textcolor=color.lime,  size=labelSizeOf(i_labelSize))
+        lbl_tp2 := label.new(lineEnd + 2, longTP2, "TP2", style=label.style_none, textcolor=color.green, size=labelSizeOf(i_labelSize))
 
 if i_showLevels and shortSignal and not na(shortSL)
     line.delete(lvl_sl)
@@ -223,51 +631,84 @@ if i_showLevels and shortSignal and not na(shortSL)
     lvl_sl  := line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
     lvl_tp1 := line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
     lvl_tp2 := line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    lbl_sl  := label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lbl_tp1 := label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lbl_tp2 := label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if i_showLabels
+        lbl_sl  := label.new(lineEnd + 2, shortSL,  "SL",  style=label.style_none, textcolor=color.red,   size=labelSizeOf(i_labelSize))
+        lbl_tp1 := label.new(lineEnd + 2, shortTP1, "TP1", style=label.style_none, textcolor=color.lime,  size=labelSizeOf(i_labelSize))
+        lbl_tp2 := label.new(lineEnd + 2, shortTP2, "TP2", style=label.style_none, textcolor=color.green, size=labelSizeOf(i_labelSize))
 
-// --- DASHBOARD ------------------------------------------------
+if i_showLevels and not na(lvl_sl)
+    line.set_x2(lvl_sl,  bar_index + 20)
+    line.set_x2(lvl_tp1, bar_index + 20)
+    line.set_x2(lvl_tp2, bar_index + 20)
+    if i_showLabels and not na(lbl_sl)
+        label.set_x(lbl_sl,  bar_index + 22)
+        label.set_x(lbl_tp1, bar_index + 22)
+        label.set_x(lbl_tp2, bar_index + 22)
 
-if i_showDash
+// ============================================================
+// HTF BIAS DASHBOARD
+// ============================================================
+
+if i_showDash and barstate.islast
+    tablePos tPos = switch i_dashPos
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.top_right
+
     int   tot     = strategy.wintrades + strategy.losstrades
     float winPct  = tot > 0 ? float(strategy.wintrades) / float(tot) * 100.0 : 0.0
     float pfRaw   = strategy.grossloss != 0.0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
     string winStr = tot > 0 ? str.tostring(math.round(winPct, 1)) + "%" : "N/A"
     string pfStr  = strategy.grossloss != 0.0 ? str.tostring(math.round(pfRaw, 2)) : "N/A"
     string posStr = strategy.position_size > 0.0 ? "LONG" : strategy.position_size < 0.0 ? "SHORT" : "FLAT"
+    string sesStr = nyAmSig  and i_nyAmOn   ? "NY AM"  :
+                    londonSig and i_londonOn ? "LONDON" :
+                    nyPmSig  and i_nyPmOn   ? "NY PM"  :
+                    asianSig  and i_asianOn  ? "ASIAN"  : "OFF"
     string trStr  = trend == 1 ? "BULL" : trend == -1 ? "BEAR" : "NEUT"
-    string sesStr = nyAmActive   and i_nyAmOn   ? "NY AM"  :
-                    londonActive and i_londonOn ? "LONDON" :
-                    nyPmActive   and i_nyPmOn   ? "NY PM"  :
-                    asianActive  and i_asianOn  ? "ASIAN"  : "OFF"
+    color  trCol  = trend == 1 ? i_dashBull : trend == -1 ? i_dashBear : i_dashNeut
     string swpStr = recentBullSweep ? "BULL" : recentBearSweep ? "BEAR" : "NONE"
-    string dltStr = delta > 0.0 ? "+" + str.tostring(math.round(delta, 0)) : str.tostring(math.round(delta, 0))
-    string volStr = str.tostring(math.round(relVol, 2)) + "x"
-    string cvdStr = cvd > 0.0 ? "+" + str.tostring(math.round(cvd, 0)) : str.tostring(math.round(cvd, 0))
+    string dltStr = delta > 0.0 ? "BUY  +" + str.tostring(math.round(delta, 0)) : "SELL " + str.tostring(math.round(delta, 0))
+    color  dltCol = delta > 0.0 ? i_dashBull : i_dashBear
 
-    string dash = "=== MSS v2.0 ===\n" +
-         "Session : " + sesStr + "\n" +
-         "BOS     : " + trStr + "\n" +
-         "VWAP    : " + (close > vwapVal ? "ABOVE" : "BELOW") + "\n" +
-         "Sweep   : " + swpStr + "\n" +
-         "Delta   : " + dltStr + "\n" +
-         "CVD     : " + cvdStr + "\n" +
-         "Volume  : " + volStr + "\n" +
-         "Position: " + posStr + "\n" +
-         "----------------\n" +
-         "Trades  : " + str.tostring(tot) + "\n" +
-         "Win Rate: " + winStr + "\n" +
-         "Prof Fac: " + pfStr + "\n" +
-         "Net PnL : $" + str.tostring(math.round(strategy.netprofit, 2))
+    var table dash = table.new(tPos, 3, 8,
+         bgcolor=i_dashBg, border_width=1, border_color=i_dashBdr)
 
-    var table tbl = table.new(position.top_right, 1, 1,
-         bgcolor=color.new(color.black, 10), border_color=color.new(color.gray, 30),
-         border_width=1, frame_color=color.new(color.gray, 20), frame_width=1)
-    table.cell(tbl, 0, 0, dash,
-         text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 15))
+    // Header
+    table.cell(dash, 0, 0, "HTF BIAS",  text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    table.cell(dash, 1, 0, "Structure", text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    table.cell(dash, 2, 0, "Bias",      text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    // TF1 bias
+    table.cell(dash, 0, 1, tfLabel(i_htf1), text_color=i_dashLbl, text_size=size.tiny)
+    table.cell(dash, 1, 1, htf1Struc,       text_color=htf1Col,   text_size=size.tiny)
+    table.cell(dash, 2, 1, htf1Bias,        text_color=htf1Col,   text_size=size.tiny)
+    // TF2 bias
+    table.cell(dash, 0, 2, tfLabel(i_htf2), text_color=i_dashLbl, text_size=size.tiny)
+    table.cell(dash, 1, 2, htf2Struc,       text_color=htf2Col,   text_size=size.tiny)
+    table.cell(dash, 2, 2, htf2Bias,        text_color=htf2Col,   text_size=size.tiny)
+    // Divider row
+    table.cell(dash, 0, 3, "MARKET",   text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    table.cell(dash, 1, 3, "State",    text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    table.cell(dash, 2, 3, "Value",    text_color=i_dashHdrTxt, text_size=size.tiny, bgcolor=i_dashHdrBg)
+    // Market rows
+    table.cell(dash, 0, 4, "Session",  text_color=i_dashLbl,  text_size=size.tiny)
+    table.cell(dash, 1, 4, sesStr,     text_color=i_dashLbl,  text_size=size.tiny)
+    table.cell(dash, 2, 4, posStr,     text_color=strategy.position_size != 0.0 ? i_dashBull : i_dashNeut, text_size=size.tiny)
+    table.cell(dash, 0, 5, "BOS",      text_color=i_dashLbl,  text_size=size.tiny)
+    table.cell(dash, 1, 5, trStr,      text_color=trCol,      text_size=size.tiny)
+    table.cell(dash, 2, 5, swpStr,     text_color=recentBullSweep ? i_dashBull : recentBearSweep ? i_dashBear : i_dashNeut, text_size=size.tiny)
+    table.cell(dash, 0, 6, "Delta",    text_color=i_dashLbl,  text_size=size.tiny)
+    table.cell(dash, 1, 6, dltStr,     text_color=dltCol,     text_size=size.tiny)
+    table.cell(dash, 2, 6, str.tostring(math.round(relVol, 2)) + "x", text_color=volOk ? i_dashBull : i_dashNeut, text_size=size.tiny)
+    // Stats
+    table.cell(dash, 0, 7, winStr,     text_color=i_dashBull, text_size=size.tiny)
+    table.cell(dash, 1, 7, "PF " + pfStr, text_color=i_dashLbl, text_size=size.tiny)
+    table.cell(dash, 2, 7, "$" + str.tostring(math.round(strategy.netprofit, 0)), text_color=strategy.netprofit >= 0.0 ? i_dashBull : i_dashBear, text_size=size.tiny)
 
-// --- ALERTS ---------------------------------------------------
+// ============================================================
+// ALERTS
+// ============================================================
 
 alertcondition(longSignal,   title="MSS Long",   message="MSS Long  | {{ticker}} @ {{close}} | {{time}}")
 alertcondition(shortSignal,  title="MSS Short",  message="MSS Short | {{ticker}} @ {{close}} | {{time}}")
