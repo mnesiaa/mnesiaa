@@ -15,11 +15,11 @@ strategy(
 
 // ─── INPUTS ───────────────────────────────────────────────────
 
-int   i_emaFast    = input.int(9,     "EMA Fast (Pullback)", minval=3,   maxval=50,  group="EMAs")
-int   i_emaSlow    = input.int(21,    "EMA Slow (Trend)",    minval=5,   maxval=200, group="EMAs")
-int   i_rsiLen     = input.int(9,     "RSI Length",          minval=2,               group="RSI")
-int   i_rsiOB      = input.int(70,    "RSI Overbought",      minval=60,  maxval=80,  group="RSI")
-int   i_rsiOS      = input.int(30,    "RSI Oversold",        minval=20,  maxval=40,  group="RSI")
+int   i_hmaFast    = input.int(9,     "HMA Fast (Pullback)", minval=3,  maxval=50,  group="Hull MAs")
+int   i_hmaSlow    = input.int(21,    "HMA Slow (Trend)",    minval=5,  maxval=100, group="Hull MAs")
+int   i_cciLen     = input.int(10,    "CCI Length",          minval=3,  maxval=50,  group="CCI")
+int   i_cciOB      = input.int(100,   "CCI Overbought",      minval=50, maxval=200, group="CCI")
+int   i_cciOS      = input.int(-100,  "CCI Oversold",        minval=-200, maxval=-50, group="CCI")
 int   i_atrLen     = input.int(14,    "ATR Length",          minval=2,               group="Risk")
 float i_atrSLMult  = input.float(1.0, "ATR SL Multiplier",  minval=0.5, step=0.1,   group="Risk")
 float i_tp1R       = input.float(1.5, "TP1 R-Multiple",     minval=0.5, step=0.25,  group="Risk")
@@ -33,9 +33,13 @@ bool  i_showLevels = input.bool(true, "Show SL / TP Lines",             group="V
 
 // ─── INDICATORS ───────────────────────────────────────────────
 
-float emaFast = ta.ema(close, i_emaFast)
-float emaSlow = ta.ema(close, i_emaSlow)
-float rsiVal  = ta.rsi(close, i_rsiLen)
+// Hull Moving Average: near-zero lag vs EMA
+hma(float src, int len) =>
+    ta.wma(2.0 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len)))
+
+float hmaFast = hma(close, i_hmaFast)
+float hmaSlow = hma(close, i_hmaSlow)
+float cciVal  = ta.cci(close, i_cciLen)
 float atrVal  = ta.atr(i_atrLen)
 float vwapVal = ta.vwap(hlc3)
 
@@ -46,20 +50,20 @@ bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesE
 
 // ─── CONDITIONS ───────────────────────────────────────────────
 
-bool trendUp      = emaSlow > emaSlow[1]
-bool trendDown    = emaSlow < emaSlow[1]
-bool emaAlignUp   = emaFast > emaSlow
-bool emaAlignDown = emaFast < emaSlow
-bool pullbackLong  = low[1]  <= emaFast[1] and close > emaFast and close > open
-bool pullbackShort = high[1] >= emaFast[1] and close < emaFast and close < open
+bool trendUp      = hmaSlow > hmaSlow[1]
+bool trendDown    = hmaSlow < hmaSlow[1]
+bool hmaAlignUp   = hmaFast > hmaSlow
+bool hmaAlignDown = hmaFast < hmaSlow
+bool pullbackLong  = low[1]  <= hmaFast[1] and close > hmaFast and close > open
+bool pullbackShort = high[1] >= hmaFast[1] and close < hmaFast and close < open
 bool aboveVWAP    = close > vwapVal
 bool belowVWAP    = close < vwapVal
-bool rsiOkLong    = rsiVal < i_rsiOB
-bool rsiOkShort   = rsiVal > i_rsiOS
+bool cciOkLong    = cciVal < i_cciOB
+bool cciOkShort   = cciVal > i_cciOS
 bool noPos        = strategy.position_size == 0.0
 
-bool longSignal  = inSession and trendUp   and emaAlignUp   and pullbackLong  and aboveVWAP and rsiOkLong  and noPos
-bool shortSignal = inSession and trendDown and emaAlignDown and pullbackShort and belowVWAP and rsiOkShort and noPos
+bool longSignal  = inSession and trendUp   and hmaAlignUp   and pullbackLong  and aboveVWAP and cciOkLong  and noPos
+bool shortSignal = inSession and trendDown and hmaAlignDown and pullbackShort and belowVWAP and cciOkShort and noPos
 
 // ─── SL / TP (computed once per signal, stored in var) ────────
 
@@ -103,8 +107,8 @@ if strategy.position_size < 0.0 and not na(shortSL)
 
 bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
 
-plot(emaFast, "EMA Fast", color=color.new(color.yellow, 0), linewidth=2)
-plot(emaSlow, "EMA Slow", color=color.new(color.orange, 0), linewidth=2)
+plot(hmaFast, "HMA Fast", color=color.new(color.yellow, 0), linewidth=2)
+plot(hmaSlow, "HMA Slow", color=color.new(color.orange, 0), linewidth=2)
 plot(vwapVal, "VWAP",     color=color.new(color.purple, 0), linewidth=2)
 
 plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
@@ -159,13 +163,13 @@ if i_showDash
     string winStr = tot > 0 ? str.tostring(math.round(winPct, 1)) + "%" : "N/A"
     string pfStr  = strategy.grossloss != 0.0 ? str.tostring(math.round(pfRaw, 2)) : "N/A"
     string posStr = strategy.position_size > 0.0 ? "LONG" : strategy.position_size < 0.0 ? "SHORT" : "FLAT"
-    string trStr  = trendUp ? "UP" : trendDown ? "DOWN" : "NEUTRAL"
+    string trStr  = trendUp ? "UP" : trendDown ? "DOWN" : "FLAT"
 
     string dash = "=== EPD v1.0 ===\n" +
          "Session : " + (inSession ? "ACTIVE" : "OFF") + "\n" +
          "Trend   : " + trStr + "\n" +
          "VWAP    : " + (aboveVWAP ? "ABOVE" : "BELOW") + "\n" +
-         "RSI     : " + str.tostring(math.round(rsiVal, 1)) + "\n" +
+         "CCI     : " + str.tostring(math.round(cciVal, 1)) + "\n" +
          "Position: " + posStr + "\n" +
          "----------------\n" +
          "Trades  : " + str.tostring(tot) + "\n" +
