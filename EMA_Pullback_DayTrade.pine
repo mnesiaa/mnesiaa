@@ -11,9 +11,7 @@ strategy(
      commission_value  = 0.02,
      slippage          = 1,
      calc_on_every_tick      = false,
-     process_orders_on_close = true,
-     max_lines_count         = 100,
-     max_labels_count        = 100)
+     process_orders_on_close = true)
 
 // ─── INPUTS ───────────────────────────────────────────────────
 
@@ -114,24 +112,43 @@ plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
 plotshape(shortSignal, location=location.abovebar, style=shape.triangledown,
      color=color.new(color.red,  0), size=size.normal, title="Short Signal")
 
-// Pre-compute line end x so it's available in all drawing blocks
+// Persistent handles so old drawings are deleted before new ones are created
+var line  lvl_sl1  = na
+var line  lvl_tp1a = na
+var line  lvl_tp2a = na
+var label lbl_sl1  = na
+var label lbl_tp1a = na
+var label lbl_tp2a = na
+
 int lineEnd = bar_index + 30
 
 if i_showLevels and longSignal and not na(longSL)
-    line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
-    line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
-    line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    line.delete(lvl_sl1)
+    line.delete(lvl_tp1a)
+    line.delete(lvl_tp2a)
+    label.delete(lbl_sl1)
+    label.delete(lbl_tp1a)
+    label.delete(lbl_tp2a)
+    lvl_sl1  := line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    lvl_tp1a := line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    lvl_tp2a := line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    lbl_sl1  := label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp1a := label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lbl_tp2a := label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
 if i_showLevels and shortSignal and not na(shortSL)
-    line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
-    line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
-    line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    line.delete(lvl_sl1)
+    line.delete(lvl_tp1a)
+    line.delete(lvl_tp2a)
+    label.delete(lbl_sl1)
+    label.delete(lbl_tp1a)
+    label.delete(lbl_tp2a)
+    lvl_sl1  := line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    lvl_tp1a := line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    lvl_tp2a := line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    lbl_sl1  := label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp1a := label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lbl_tp2a := label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
 // ─── DASHBOARD ────────────────────────────────────────────────
 
