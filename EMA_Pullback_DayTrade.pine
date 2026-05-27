@@ -1,7 +1,7 @@
 //@version=6
 strategy(
-     title             = "EMA Pullback Day Trade",
-     shorttitle        = "EPD v1.0",
+     title             = "Market Structure Scalper",
+     shorttitle        = "MSS v1.0",
      overlay           = true,
      pyramiding        = 0,
      default_qty_type  = strategy.percent_of_equity,
@@ -15,13 +15,10 @@ strategy(
 
 // ─── INPUTS ───────────────────────────────────────────────────
 
-int   i_hmaFast    = input.int(9,     "HMA Fast (Pullback)", minval=3,  maxval=50,  group="Hull MAs")
-int   i_hmaSlow    = input.int(21,    "HMA Slow (Trend)",    minval=5,  maxval=100, group="Hull MAs")
-int   i_cciLen     = input.int(10,    "CCI Length",          minval=3,  maxval=50,  group="CCI")
-int   i_cciOB      = input.int(100,   "CCI Overbought",      minval=50, maxval=200, group="CCI")
-int   i_cciOS      = input.int(-100,  "CCI Oversold",        minval=-200, maxval=-50, group="CCI")
+int   i_strLen     = input.int(20,    "Structure Lookback",  minval=5,   maxval=100, group="Structure")
+int   i_sweepWin   = input.int(3,     "Sweep Valid (bars)",  minval=1,   maxval=10,  group="Structure")
 int   i_atrLen     = input.int(14,    "ATR Length",          minval=2,               group="Risk")
-float i_atrSLMult  = input.float(1.0, "ATR SL Multiplier",  minval=0.5, step=0.1,   group="Risk")
+float i_atrSLMult  = input.float(0.5, "ATR SL Buffer",      minval=0.1, step=0.1,   group="Risk")
 float i_tp1R       = input.float(1.5, "TP1 R-Multiple",     minval=0.5, step=0.25,  group="Risk")
 float i_tp2R       = input.float(3.0, "TP2 R-Multiple",     minval=1.0, step=0.25,  group="Risk")
 float i_tp1Pct     = input.float(60.0,"% Exit at TP1",      minval=10,  maxval=90,  group="Risk")
@@ -30,16 +27,10 @@ int   i_sesEnd     = input.int(1130,  "Session End HHMM EST",           group="S
 bool  i_useSession = input.bool(true, "Filter to NY AM Session",        group="Session")
 bool  i_showDash   = input.bool(true, "Show Dashboard",                 group="Visual")
 bool  i_showLevels = input.bool(true, "Show SL / TP Lines",             group="Visual")
+bool  i_showStr    = input.bool(true, "Show Structure Levels",          group="Visual")
 
-// ─── INDICATORS ───────────────────────────────────────────────
+// ─── TOOLS (ATR = SL sizing only, VWAP = session bias only) ──
 
-// Hull Moving Average: near-zero lag vs EMA
-hma(float src, int len) =>
-    ta.wma(2.0 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len)))
-
-float hmaFast = hma(close, i_hmaFast)
-float hmaSlow = hma(close, i_hmaSlow)
-float cciVal  = ta.cci(close, i_cciLen)
 float atrVal  = ta.atr(i_atrLen)
 float vwapVal = ta.vwap(hlc3)
 
@@ -48,24 +39,54 @@ float vwapVal = ta.vwap(hlc3)
 int  barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
 bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
 
-// ─── CONDITIONS ───────────────────────────────────────────────
+// ─── MARKET STRUCTURE ─────────────────────────────────────────
 
-bool trendUp      = hmaSlow > hmaSlow[1]
-bool trendDown    = hmaSlow < hmaSlow[1]
-bool hmaAlignUp   = hmaFast > hmaSlow
-bool hmaAlignDown = hmaFast < hmaSlow
-bool pullbackLong  = low[1]  <= hmaFast[1] and close > hmaFast and close > open
-bool pullbackShort = high[1] >= hmaFast[1] and close < hmaFast and close < open
-bool aboveVWAP    = close > vwapVal
-bool belowVWAP    = close < vwapVal
-bool cciOkLong    = cciVal < i_cciOB
-bool cciOkShort   = cciVal > i_cciOS
-bool noPos        = strategy.position_size == 0.0
+// [1] offset = confirmed bars only, never repaints
+float strHigh = ta.highest(high, i_strLen)[1]
+float strLow  = ta.lowest(low,   i_strLen)[1]
 
-bool longSignal  = inSession and trendUp   and hmaAlignUp   and pullbackLong  and aboveVWAP and cciOkLong  and noPos
-bool shortSignal = inSession and trendDown and hmaAlignDown and pullbackShort and belowVWAP and cciOkShort and noPos
+// BOS: track which way structure last broke
+var int trend = 0
+if close > strHigh
+    trend := 1
+if close < strLow
+    trend := -1
 
-// ─── SL / TP (computed once per signal, stored in var) ────────
+bool bullBOS = close > strHigh and close[1] <= strHigh
+bool bearBOS = close < strLow  and close[1] >= strLow
+
+// Liquidity sweep: wick pierces structure level, candle body reclaims it
+// This fires on the same bar as the event — zero lag
+bool bullSweepBar = low < strLow  and close > strLow  and close > open
+bool bearSweepBar = high > strHigh and close < strHigh and close < open
+
+// Track actual sweep price for tight SL placement
+var float lastSweepLow  = na
+var float lastSweepHigh = na
+if bullSweepBar
+    lastSweepLow  := low
+if bearSweepBar
+    lastSweepHigh := high
+
+// Count bars since last sweep without using ta.barssince (avoids na type issues)
+var int bullSweepAge = 99999
+var int bearSweepAge = 99999
+bullSweepAge := bullSweepBar ? 0 : bullSweepAge + 1
+bearSweepAge := bearSweepBar ? 0 : bearSweepAge + 1
+
+bool recentBullSweep = bullSweepAge <= i_sweepWin
+bool recentBearSweep = bearSweepAge <= i_sweepWin
+
+// ─── SIGNALS ──────────────────────────────────────────────────
+
+bool noPos = strategy.position_size == 0.0
+
+// Long:  stop hunt below structure lows, price reclaims → buy the flush
+// Short: stop hunt above structure highs, price reclaims → sell the spike
+bool longSignal  = inSession and recentBullSweep and close > vwapVal and trend >= 0 and noPos
+bool shortSignal = inSession and recentBearSweep and close < vwapVal and trend <= 0 and noPos
+
+// ─── SL / TP ──────────────────────────────────────────────────
 
 var float longSL   = na
 var float longTP1  = na
@@ -75,12 +96,12 @@ var float shortTP1 = na
 var float shortTP2 = na
 
 if longSignal
-    longSL  := math.min(low, low[1]) - atrVal * i_atrSLMult
+    longSL  := nz(lastSweepLow, strLow) - atrVal * i_atrSLMult
     longTP1 := close + (close - longSL) * i_tp1R
     longTP2 := close + (close - longSL) * i_tp2R
 
 if shortSignal
-    shortSL  := math.max(high, high[1]) + atrVal * i_atrSLMult
+    shortSL  := nz(lastSweepHigh, strHigh) + atrVal * i_atrSLMult
     shortTP1 := close - (shortSL - close) * i_tp1R
     shortTP2 := close - (shortSL - close) * i_tp2R
 
@@ -90,10 +111,10 @@ float tp1Qty = i_tp1Pct
 float tp2Qty = 100.0 - i_tp1Pct
 
 if longSignal
-    strategy.entry("Long",  strategy.long,  comment="EPD Long")
+    strategy.entry("Long",  strategy.long,  comment="MSS Long")
 
 if shortSignal
-    strategy.entry("Short", strategy.short, comment="EPD Short")
+    strategy.entry("Short", strategy.short, comment="MSS Short")
 
 if strategy.position_size > 0.0 and not na(longSL)
     strategy.exit("L-TP1", "Long",  qty_percent=tp1Qty, limit=longTP1, stop=longSL,  comment="TP1")
@@ -107,69 +128,80 @@ if strategy.position_size < 0.0 and not na(shortSL)
 
 bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
 
-plot(hmaFast, "HMA Fast", color=color.new(color.yellow, 0), linewidth=2)
-plot(hmaSlow, "HMA Slow", color=color.new(color.orange, 0), linewidth=2)
-plot(vwapVal, "VWAP",     color=color.new(color.purple, 0), linewidth=2)
+plot(i_showStr ? strHigh : na, "Struct High", color=color.new(color.red,  40), style=plot.style_stepline, linewidth=1)
+plot(i_showStr ? strLow  : na, "Struct Low",  color=color.new(color.lime, 40), style=plot.style_stepline, linewidth=1)
+plot(vwapVal, "VWAP", color=color.new(color.purple, 0), linewidth=2)
+
+plotshape(bullSweepBar, location=location.belowbar, style=shape.circle,
+     color=color.new(color.lime, 20), size=size.tiny, title="Bull Sweep")
+plotshape(bearSweepBar, location=location.abovebar, style=shape.circle,
+     color=color.new(color.red,  20), size=size.tiny, title="Bear Sweep")
+
+plotshape(bullBOS, location=location.abovebar, style=shape.labelup,
+     color=color.new(color.lime, 0), textcolor=color.black, text="BOS", size=size.tiny, title="Bull BOS")
+plotshape(bearBOS, location=location.belowbar, style=shape.labeldown,
+     color=color.new(color.red,  0), textcolor=color.white, text="BOS", size=size.tiny, title="Bear BOS")
 
 plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
      color=color.new(color.lime, 0), size=size.normal, title="Long Signal")
 plotshape(shortSignal, location=location.abovebar, style=shape.triangledown,
      color=color.new(color.red,  0), size=size.normal, title="Short Signal")
 
-// Persistent handles so old drawings are deleted before new ones are created
-var line  lvl_sl1  = na
-var line  lvl_tp1a = na
-var line  lvl_tp2a = na
-var label lbl_sl1  = na
-var label lbl_tp1a = na
-var label lbl_tp2a = na
+// SL / TP lines — delete old before drawing new
+var line  lvl_sl  = na
+var line  lvl_tp1 = na
+var line  lvl_tp2 = na
+var label lbl_sl  = na
+var label lbl_tp1 = na
+var label lbl_tp2 = na
 
 int lineEnd = bar_index + 30
 
 if i_showLevels and longSignal and not na(longSL)
-    line.delete(lvl_sl1)
-    line.delete(lvl_tp1a)
-    line.delete(lvl_tp2a)
-    label.delete(lbl_sl1)
-    label.delete(lbl_tp1a)
-    label.delete(lbl_tp2a)
-    lvl_sl1  := line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
-    lvl_tp1a := line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
-    lvl_tp2a := line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    lbl_sl1  := label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lbl_tp1a := label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lbl_tp2a := label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    line.delete(lvl_sl)
+    line.delete(lvl_tp1)
+    line.delete(lvl_tp2)
+    label.delete(lbl_sl)
+    label.delete(lbl_tp1)
+    label.delete(lbl_tp2)
+    lvl_sl  := line.new(bar_index, longSL,  lineEnd, longSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    lvl_tp1 := line.new(bar_index, longTP1, lineEnd, longTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    lvl_tp2 := line.new(bar_index, longTP2, lineEnd, longTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    lbl_sl  := label.new(lineEnd, longSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp1 := label.new(lineEnd, longTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lbl_tp2 := label.new(lineEnd, longTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
 if i_showLevels and shortSignal and not na(shortSL)
-    line.delete(lvl_sl1)
-    line.delete(lvl_tp1a)
-    line.delete(lvl_tp2a)
-    label.delete(lbl_sl1)
-    label.delete(lbl_tp1a)
-    label.delete(lbl_tp2a)
-    lvl_sl1  := line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
-    lvl_tp1a := line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
-    lvl_tp2a := line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
-    lbl_sl1  := label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
-    lbl_tp1a := label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
-    lbl_tp2a := label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    line.delete(lvl_sl)
+    line.delete(lvl_tp1)
+    line.delete(lvl_tp2)
+    label.delete(lbl_sl)
+    label.delete(lbl_tp1)
+    label.delete(lbl_tp2)
+    lvl_sl  := line.new(bar_index, shortSL,  lineEnd, shortSL,  color=color.new(color.red,   0), style=line.style_dashed, width=1)
+    lvl_tp1 := line.new(bar_index, shortTP1, lineEnd, shortTP1, color=color.new(color.lime,  0), style=line.style_dashed, width=1)
+    lvl_tp2 := line.new(bar_index, shortTP2, lineEnd, shortTP2, color=color.new(color.green, 0), style=line.style_dashed, width=1)
+    lbl_sl  := label.new(lineEnd, shortSL,  "SL",  xloc=xloc.bar_index, color=color.new(color.red,   10), textcolor=color.white, style=label.style_label_left, size=size.small)
+    lbl_tp1 := label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
+    lbl_tp2 := label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
 // ─── DASHBOARD ────────────────────────────────────────────────
 
 if i_showDash
-    int   tot    = strategy.wintrades + strategy.losstrades
-    float winPct = tot > 0 ? float(strategy.wintrades) / float(tot) * 100.0 : 0.0
-    float pfRaw  = strategy.grossloss != 0.0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
+    int   tot     = strategy.wintrades + strategy.losstrades
+    float winPct  = tot > 0 ? float(strategy.wintrades) / float(tot) * 100.0 : 0.0
+    float pfRaw   = strategy.grossloss != 0.0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
     string winStr = tot > 0 ? str.tostring(math.round(winPct, 1)) + "%" : "N/A"
     string pfStr  = strategy.grossloss != 0.0 ? str.tostring(math.round(pfRaw, 2)) : "N/A"
     string posStr = strategy.position_size > 0.0 ? "LONG" : strategy.position_size < 0.0 ? "SHORT" : "FLAT"
-    string trStr  = trendUp ? "UP" : trendDown ? "DOWN" : "FLAT"
+    string trStr  = trend == 1 ? "BULL" : trend == -1 ? "BEAR" : "NEUT"
+    string swpStr = recentBullSweep ? "BULL" : recentBearSweep ? "BEAR" : "NONE"
 
-    string dash = "=== EPD v1.0 ===\n" +
+    string dash = "=== MSS v1.0 ===\n" +
          "Session : " + (inSession ? "ACTIVE" : "OFF") + "\n" +
-         "Trend   : " + trStr + "\n" +
-         "VWAP    : " + (aboveVWAP ? "ABOVE" : "BELOW") + "\n" +
-         "CCI     : " + str.tostring(math.round(cciVal, 1)) + "\n" +
+         "BOS     : " + trStr + "\n" +
+         "VWAP    : " + (close > vwapVal ? "ABOVE" : "BELOW") + "\n" +
+         "Sweep   : " + swpStr + "\n" +
          "Position: " + posStr + "\n" +
          "----------------\n" +
          "Trades  : " + str.tostring(tot) + "\n" +
@@ -185,5 +217,9 @@ if i_showDash
 
 // ─── ALERTS ───────────────────────────────────────────────────
 
-alertcondition(longSignal,  title="EPD Long Signal",  message="EPD Long  | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(shortSignal, title="EPD Short Signal", message="EPD Short | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(longSignal,   title="MSS Long",        message="MSS Long  | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(shortSignal,  title="MSS Short",       message="MSS Short | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bullSweepBar, title="Bull Sweep",      message="Bull liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweepBar, title="Bear Sweep",      message="Bear liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bullBOS,      title="Bull BOS",        message="Bullish BOS | {{ticker}} @ {{close}}")
+alertcondition(bearBOS,      title="Bear BOS",        message="Bearish BOS | {{ticker}} @ {{close}}")
