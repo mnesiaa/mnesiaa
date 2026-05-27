@@ -13,7 +13,7 @@ strategy(
      calc_on_every_tick      = false,
      process_orders_on_close = true)
 
-// ─── INPUTS ───────────────────────────────────────────────────
+// --- INPUTS ---------------------------------------------------
 
 int   i_strLen     = input.int(20,    "Structure Lookback",  minval=5,   maxval=100, group="Structure")
 int   i_sweepWin   = input.int(3,     "Sweep Valid (bars)",  minval=1,   maxval=10,  group="Structure")
@@ -29,17 +29,17 @@ bool  i_showDash   = input.bool(true, "Show Dashboard",                 group="V
 bool  i_showLevels = input.bool(true, "Show SL / TP Lines",             group="Visual")
 bool  i_showStr    = input.bool(true, "Show Structure Levels",          group="Visual")
 
-// ─── TOOLS (ATR = SL sizing only, VWAP = session bias only) ──
+// --- TOOLS (ATR = SL sizing only, VWAP = session bias only) --
 
 float atrVal  = ta.atr(i_atrLen)
 float vwapVal = ta.vwap(hlc3)
 
-// ─── SESSION ──────────────────────────────────────────────────
+// --- SESSION --------------------------------------------------
 
 int  barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
 bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
 
-// ─── MARKET STRUCTURE ─────────────────────────────────────────
+// --- MARKET STRUCTURE -----------------------------------------
 
 // [1] offset = confirmed bars only, never repaints
 float strHigh = ta.highest(high, i_strLen)[1]
@@ -56,7 +56,7 @@ bool bullBOS = close > strHigh and close[1] <= strHigh
 bool bearBOS = close < strLow  and close[1] >= strLow
 
 // Liquidity sweep: wick pierces structure level, candle body reclaims it
-// This fires on the same bar as the event — zero lag
+// This fires on the same bar as the event - zero lag
 bool bullSweepBar = low < strLow  and close > strLow  and close > open
 bool bearSweepBar = high > strHigh and close < strHigh and close < open
 
@@ -77,16 +77,16 @@ bearSweepAge := bearSweepBar ? 0 : bearSweepAge + 1
 bool recentBullSweep = bullSweepAge <= i_sweepWin
 bool recentBearSweep = bearSweepAge <= i_sweepWin
 
-// ─── SIGNALS ──────────────────────────────────────────────────
+// --- SIGNALS --------------------------------------------------
 
 bool noPos = strategy.position_size == 0.0
 
-// Long:  stop hunt below structure lows, price reclaims → buy the flush
-// Short: stop hunt above structure highs, price reclaims → sell the spike
+// Long:  stop hunt below structure lows, price reclaims -> buy the flush
+// Short: stop hunt above structure highs, price reclaims -> sell the spike
 bool longSignal  = inSession and recentBullSweep and close > vwapVal and trend >= 0 and noPos
 bool shortSignal = inSession and recentBearSweep and close < vwapVal and trend <= 0 and noPos
 
-// ─── SL / TP ──────────────────────────────────────────────────
+// --- SL / TP --------------------------------------------------
 
 var float longSL   = na
 var float longTP1  = na
@@ -105,7 +105,7 @@ if shortSignal
     shortTP1 := close - (shortSL - close) * i_tp1R
     shortTP2 := close - (shortSL - close) * i_tp2R
 
-// ─── EXECUTION ────────────────────────────────────────────────
+// --- EXECUTION ------------------------------------------------
 
 float tp1Qty = i_tp1Pct
 float tp2Qty = 100.0 - i_tp1Pct
@@ -124,7 +124,7 @@ if strategy.position_size < 0.0 and not na(shortSL)
     strategy.exit("S-TP1", "Short", qty_percent=tp1Qty, limit=shortTP1, stop=shortSL, comment="TP1")
     strategy.exit("S-TP2", "Short", qty_percent=tp2Qty, limit=shortTP2, stop=shortSL, comment="TP2")
 
-// ─── VISUALS ──────────────────────────────────────────────────
+// --- VISUALS --------------------------------------------------
 
 bgcolor(i_useSession and inSession ? color.new(color.blue, 93) : na, title="Session BG")
 
@@ -147,7 +147,7 @@ plotshape(longSignal,  location=location.belowbar, style=shape.triangleup,
 plotshape(shortSignal, location=location.abovebar, style=shape.triangledown,
      color=color.new(color.red,  0), size=size.normal, title="Short Signal")
 
-// SL / TP lines — delete old before drawing new
+// SL / TP lines - delete old before drawing new
 var line  lvl_sl  = na
 var line  lvl_tp1 = na
 var line  lvl_tp2 = na
@@ -185,7 +185,7 @@ if i_showLevels and shortSignal and not na(shortSL)
     lbl_tp1 := label.new(lineEnd, shortTP1, "TP1", xloc=xloc.bar_index, color=color.new(color.lime,  10), textcolor=color.black, style=label.style_label_left, size=size.small)
     lbl_tp2 := label.new(lineEnd, shortTP2, "TP2", xloc=xloc.bar_index, color=color.new(color.green, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
 
-// ─── DASHBOARD ────────────────────────────────────────────────
+// --- DASHBOARD ------------------------------------------------
 
 if i_showDash
     int   tot     = strategy.wintrades + strategy.losstrades
@@ -215,7 +215,7 @@ if i_showDash
     table.cell(tbl, 0, 0, dash,
          text_color=color.white, text_size=size.small, bgcolor=color.new(color.black, 15))
 
-// ─── ALERTS ───────────────────────────────────────────────────
+// --- ALERTS ---------------------------------------------------
 
 alertcondition(longSignal,   title="MSS Long",        message="MSS Long  | {{ticker}} @ {{close}} | {{time}}")
 alertcondition(shortSignal,  title="MSS Short",       message="MSS Short | {{ticker}} @ {{close}} | {{time}}")
