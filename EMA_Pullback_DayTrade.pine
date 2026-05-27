@@ -11,13 +11,15 @@ strategy(
      commission_value  = 0.02,
      slippage          = 1,
      calc_on_every_tick      = false,
-     process_orders_on_close = true)
+     process_orders_on_close = true,
+     max_lines_count         = 100,
+     max_labels_count        = 100)
 
 // ─── INPUTS ───────────────────────────────────────────────────
 
-int   i_emaFast    = input.int(20,    "EMA Fast (Pullback)", minval=5,   maxval=50,  group="EMAs")
-int   i_emaSlow    = input.int(50,    "EMA Slow (Trend)",    minval=20,  maxval=200, group="EMAs")
-int   i_rsiLen     = input.int(14,    "RSI Length",          minval=2,               group="RSI")
+int   i_emaFast    = input.int(9,     "EMA Fast (Pullback)", minval=3,   maxval=50,  group="EMAs")
+int   i_emaSlow    = input.int(21,    "EMA Slow (Trend)",    minval=5,   maxval=200, group="EMAs")
+int   i_rsiLen     = input.int(9,     "RSI Length",          minval=2,               group="RSI")
 int   i_rsiOB      = input.int(70,    "RSI Overbought",      minval=60,  maxval=80,  group="RSI")
 int   i_rsiOS      = input.int(30,    "RSI Oversold",        minval=20,  maxval=40,  group="RSI")
 int   i_atrLen     = input.int(14,    "ATR Length",          minval=2,               group="Risk")
@@ -46,8 +48,8 @@ bool inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesE
 
 // ─── CONDITIONS ───────────────────────────────────────────────
 
-bool trendUp      = emaSlow > emaSlow[3]
-bool trendDown    = emaSlow < emaSlow[3]
+bool trendUp      = emaSlow > emaSlow[1]
+bool trendDown    = emaSlow < emaSlow[1]
 bool emaAlignUp   = emaFast > emaSlow
 bool emaAlignDown = emaFast < emaSlow
 bool pullbackLong  = low[1]  <= emaFast[1] and close > emaFast and close > open
