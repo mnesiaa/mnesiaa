@@ -331,12 +331,6 @@ getOrbStop(d) =>
         sv := nz(orbH, high) * (1.0 + slBufPct / 100.0)
     sv
 
-drawLevels(isLong) =>
-    float rr = math.abs(ePx - spPx)
-    t1 := isLong ? ePx + rr * tp1R : ePx - rr * tp1R
-    t2 := isLong ? ePx + rr * tp2R : ePx - rr * tp2R
-    t3 := isLong ? ePx + rr * tp3R : ePx - rr * tp3R
-
 // ── TRADE EXECUTION ─────────────────────────────────────────────────────────
 var int   nyT = 0
 var int   asT = 0
@@ -347,7 +341,10 @@ var int   cCt = 0
 if orbLongSig and not sweepLong
     ePx  := close
     spPx := getOrbStop(1)
-    drawLevels(true)
+    float rr1 = math.abs(ePx - spPx)
+    t1   := ePx + rr1 * tp1R
+    t2   := ePx + rr1 * tp2R
+    t3   := ePx + rr1 * tp3R
     strategy.entry("ORB-L", strategy.long, comment="ORB-L " + grade)
     strategy.exit("ORB-LX", "ORB-L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
@@ -357,7 +354,10 @@ if orbLongSig and not sweepLong
 if orbShortSig and not sweepShort
     ePx  := close
     spPx := getOrbStop(-1)
-    drawLevels(false)
+    float rr2 = math.abs(ePx - spPx)
+    t1   := ePx - rr2 * tp1R
+    t2   := ePx - rr2 * tp2R
+    t3   := ePx - rr2 * tp3R
     strategy.entry("ORB-S", strategy.short, comment="ORB-S " + grade)
     strategy.exit("ORB-SX", "ORB-S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
@@ -367,7 +367,10 @@ if orbShortSig and not sweepShort
 if sweepLong
     ePx  := close
     spPx := getSweepStop(1)
-    drawLevels(true)
+    float rr3 = math.abs(ePx - spPx)
+    t1   := ePx + rr3 * tp1R
+    t2   := ePx + rr3 * tp2R
+    t3   := ePx + rr3 * tp3R
     strategy.entry("L", strategy.long, comment="L " + grade)
     strategy.exit("LX", "L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
@@ -379,7 +382,10 @@ if sweepLong
 if sweepShort
     ePx  := close
     spPx := getSweepStop(-1)
-    drawLevels(false)
+    float rr4 = math.abs(ePx - spPx)
+    t1   := ePx - rr4 * tp1R
+    t2   := ePx - rr4 * tp2R
+    t3   := ePx - rr4 * tp3R
     strategy.entry("S", strategy.short, comment="S " + grade)
     strategy.exit("SX", "S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
