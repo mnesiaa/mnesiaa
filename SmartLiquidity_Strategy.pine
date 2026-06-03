@@ -1,36 +1,32 @@
 //@version=6
 // Smart Liquidity & Structure Strategy (SLS)
-// HTF Bias + Liquidity Sweeps + MSS/CHOCH + Order Flow + ORB + Scoring Engine
-// Non-repainting — signals confirm on bar close. Targets 2+ quality entries per session.
+// HTF Bias + Liquidity + MSS/CHOCH + Order Flow + ORB + Scoring
+// Non-repainting — confirms on bar close. 2+ quality entries per session.
 strategy("Smart Liquidity & Structure Strategy", shorttitle="SLS", overlay=true, pyramiding=0, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, commission_type=strategy.commission.percent, commission_value=0.02, calc_on_every_tick=false, process_orders_on_close=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
-// ── INPUTS ─────────────────────────────────────────────────────────────────
-grpS = "Sessions"
-useNY   = input.bool(true,  "NY AM  09:30-11:30", group=grpS)
-useAS   = input.bool(true,  "Asia   19:00-00:00",  group=grpS)
-tzI     = input.string("America/New_York", "Timezone", group=grpS)
+// ── INPUTS ──────────────────────────────────────────────────────────────────
+useNY    = input.bool(true,  "NY AM  09:30-11:30",       group="Sessions")
+useAS    = input.bool(true,  "Asia   19:00-00:00",        group="Sessions")
+tzI      = input.string("America/New_York", "Timezone",   group="Sessions")
+htf1     = input.timeframe("D",   "Daily",                group="HTF Bias")
+htf2     = input.timeframe("240", "4H",                   group="HTF Bias")
+htf3     = input.timeframe("60",  "1H",                   group="HTF Bias")
+pivLen   = input.int(5,    "Pivot Lookback",  minval=2,   group="Structure")
+liqLB    = input.int(30,   "Liq Lookback",   minval=5,   group="Liquidity")
+slBufPct = input.float(0.05,"SL Buffer %",   step=0.01,  group="Liquidity")
+rvolLen  = input.int(20,   "RVOL Length",    minval=2,   group="Order Flow")
+rvolMin  = input.float(1.1, "Min RVOL",      step=0.1,   group="Order Flow")
+useFVG   = input.bool(true, "Score FVG",                  group="FVG")
+minScore = input.int(50,   "Min Score",                   group="Grade")
+tp1R     = input.float(1.0, "TP1 R", step=0.5,           group="Risk")
+tp2R     = input.float(2.0, "TP2 R", step=0.5,           group="Risk")
+tp3R     = input.float(3.0, "TP3 R", step=0.5,           group="Risk")
+showDash = input.bool(true, "Dashboard",                   group="Display")
+showVWAP = input.bool(true, "VWAP",                        group="Display")
+showORB  = input.bool(true, "ORB Lines",                   group="Display")
+showLiq  = input.bool(true, "Sweep Labels",                group="Display")
 
-grpH = "HTF Bias"
-htf1 = input.timeframe("D",   "Daily", group=grpH)
-htf2 = input.timeframe("240", "4H",    group=grpH)
-htf3 = input.timeframe("60",  "1H",    group=grpH)
-
-pivLen   = input.int(5,    "Pivot Lookback",      minval=2,  group="Structure")
-liqLB    = input.int(30,   "Liquidity Lookback",  minval=5,  group="Liquidity")
-slBufPct = input.float(0.05,"SL Buffer %",        step=0.01, group="Liquidity")
-rvolLen  = input.int(20,   "RVOL Length",         minval=2,  group="Order Flow")
-rvolMin  = input.float(1.1, "Min RVOL",           step=0.1,  group="Order Flow")
-useFVG   = input.bool(true, "Score FVG",                     group="FVG")
-minScore = input.int(55,   "Min Score to Trade",             group="Grade")
-tp1R     = input.float(1.0, "TP1 R", step=0.5,              group="Risk")
-tp2R     = input.float(2.0, "TP2 R", step=0.5,              group="Risk")
-tp3R     = input.float(3.0, "TP3 R", step=0.5,              group="Risk")
-showDash = input.bool(true, "Dashboard",                      group="Display")
-showVWAP = input.bool(true, "VWAP",                           group="Display")
-showORB  = input.bool(true, "ORB Lines",                      group="Display")
-showLiq  = input.bool(true, "Sweep Labels",                   group="Display")
-
-// ── COLORS ─────────────────────────────────────────────────────────────────
+// ── COLORS ──────────────────────────────────────────────────────────────────
 cBull = color.new(#26a69a, 0)
 cBear = color.new(#ef5350, 0)
 cNeut = color.new(color.gray, 0)
@@ -38,7 +34,7 @@ cVWAP = color.new(#2962ff, 0)
 cORB  = color.new(#ff9800, 0)
 
 // ── DASHBOARD HELPER ────────────────────────────────────────────────────────
-var table dash = table.new(position.top_right, 2, 17, border_width=1, frame_color=color.gray, frame_width=1)
+var table dash = table.new(position.top_right, 2, 18, border_width=1, frame_color=color.gray, frame_width=1)
 
 dashRow(t, i, k, v, vc) =>
     table.cell(t, 0, i, k, text_color=color.white, text_size=size.small, bgcolor=color.new(#1e1e2e, 0), text_halign=text.align_left)
@@ -59,14 +55,7 @@ else if inAS
 else
     sessName := "OFF-SESSION"
 
-// track bars elapsed inside each session (used to reset signal limiter)
-var int sessBars = 0
-if newS
-    sessBars := 0
-else if inWin
-    sessBars += 1
-
-// ── VWAP (session-anchored) ─────────────────────────────────────────────────
+// ── SESSION-ANCHORED VWAP ───────────────────────────────────────────────────
 var float vN = na
 var float vD = na
 if newS
@@ -143,15 +132,11 @@ else
     strTxt := "RANGING"
 
 // ── LIQUIDITY MODEL ─────────────────────────────────────────────────────────
-// prev-day levels
 pdH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
 pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+hh  = ta.highest(high, liqLB)
+ll  = ta.lowest(low,   liqLB)
 
-// rolling swing highs/lows + session extremes
-hh = ta.highest(high, liqLB)
-ll = ta.lowest(low,   liqLB)
-
-// session high/low (resets each new session)
 var float sHi = na
 var float sLo = na
 if newS
@@ -161,16 +146,13 @@ else
     sHi := math.max(nz(sHi, high), high)
     sLo := math.min(nz(sLo, low),  low)
 
-// liquidity pool = highest of prev-day, rolling, and session
 lRH = math.max(math.max(nz(pdH, hh), hh), nz(sHi, hh))
 lRL = math.min(math.min(nz(pdL, ll), ll), nz(sLo, ll))
 
-// sweep: wick through pool AND close back inside (confirmed non-repaint)
 swH   = high > lRH and close < lRH
 swL   = low  < lRL and close > lRL
 swept = swH or swL
 
-// also track a recent sweep (within last 5 bars) so MSS can follow a sweep
 var bool recentSwH = false
 var bool recentSwL = false
 if swH
@@ -179,16 +161,11 @@ if swH
 if swL
     recentSwL := true
     recentSwH := false
-// decay after 5 bars
-if ta.barssince(swH) > 5
+if ta.barssince(swH) > 6
     recentSwH := false
-if ta.barssince(swL) > 5
+if ta.barssince(swL) > 6
     recentSwL := false
 
-swExH = swH ? high : na
-swExL = swL ? low  : na
-
-// store sweep extreme for SL
 var float lastSwExH = na
 var float lastSwExL = na
 if swH
@@ -208,27 +185,23 @@ sVol   = rng > 0 ? volume * (high - close) / rng : volume * 0.5
 vDelta = bVol - sVol
 rvol   = volume / math.max(ta.sma(volume, rvolLen), 1e-9)
 atr14  = ta.atr(14)
+body   = math.abs(close - open)
 
-// order flow confirmation: delta direction + above-avg volume
-// displacement (large body) is scored but NOT required for entry
-body     = math.abs(close - open)
 dispBull = body > atr14 * 1.5 and close > open and rvol >= rvolMin
 dispBear = body > atr14 * 1.5 and close < open and rvol >= rvolMin
-
-// basic OF: just needs delta in the right direction + above average volume
-ofBull = vDelta > 0 and rvol >= rvolMin
-ofBear = vDelta < 0 and rvol >= rvolMin
-
-// strong OF (used for score bonus): includes displacement
-sofBull = ofBull and dispBull
-sofBear = ofBear and dispBear
+ofBull   = vDelta > 0 and rvol >= rvolMin
+ofBear   = vDelta < 0 and rvol >= rvolMin
+sofBull  = ofBull and dispBull
+sofBear  = ofBear and dispBear
 
 // ── FAIR VALUE GAP ──────────────────────────────────────────────────────────
 fvgB  = useFVG and low  > high[2]
 fvgBr = useFVG and high < low[2]
 
 // ── OPENING RANGE BREAKOUT ──────────────────────────────────────────────────
-inORB = not na(time(timeframe.period, "0930-0945", tzI))
+// Build the 15-min opening range for NY AM only
+inORBwin = not na(time(timeframe.period, "0930-0945", tzI))
+
 var float orbH  = na
 var float orbL  = na
 var bool  orbOK = false
@@ -237,14 +210,15 @@ if newNY
     orbH  := high
     orbL  := low
     orbOK := false
-else if inORB
+else if inORBwin
     orbH := math.max(nz(orbH, high), high)
     orbL := math.min(nz(orbL, low),  low)
-else if inNY and not inORB
+else if inNY and not inORBwin
     orbOK := true
 
-orbBU = orbOK and not na(orbH) and close > orbH and close[1] <= orbH
-orbBD = orbOK and not na(orbL) and close < orbL  and close[1] >= orbL
+// ORB breakout: close crosses outside the range on a confirmed bar
+orbBU = orbOK and not na(orbH) and not na(orbL) and close > orbH and close[1] <= orbH
+orbBD = orbOK and not na(orbH) and not na(orbL) and close < orbL  and close[1] >= orbL
 
 var string orbTxt = "N/A"
 if not orbOK and inNY
@@ -258,12 +232,12 @@ else if orbOK
 else
     orbTxt := "N/A"
 
-if showORB and orbOK
-    line.new(bar_index - 1, orbH, bar_index, orbH, color=cORB, style=line.style_dashed)
-    line.new(bar_index - 1, orbL, bar_index, orbL,  color=cORB, style=line.style_dashed)
+// draw ORB levels every bar once set (overwrite to extend them)
+if showORB and orbOK and not na(orbH)
+    line.new(bar_index - 1, orbH, bar_index, orbH, color=cORB, style=line.style_dashed, width=1)
+    line.new(bar_index - 1, orbL, bar_index, orbL,  color=cORB, style=line.style_dashed, width=1)
 
 // ── SCORING ENGINE ──────────────────────────────────────────────────────────
-// Long scoring
 sL = 0
 if htfBias == 1
     sL += 25
@@ -279,8 +253,9 @@ if fvgB
     sL += 10
 if vwBull
     sL += 10
+if orbBU
+    sL += 20
 
-// Short scoring
 sS = 0
 if htfBias == -1
     sS += 25
@@ -296,30 +271,38 @@ if fvgBr
     sS += 10
 if not vwBull
     sS += 10
+if orbBD
+    sS += 20
 
+// ── DIRECTION + GRADE ───────────────────────────────────────────────────────
 tDir  = sL >= sS ? 1 : -1
 score = math.max(sL, sS)
 
 gradeOf(x) =>
-    x >= 90 ? "A+" : x >= 80 ? "A" : x >= 70 ? "B" : x >= 60 ? "C" : x >= 55 ? "C-" : "-"
+    x >= 90 ? "A+" : x >= 80 ? "A" : x >= 70 ? "B" : x >= 60 ? "C" : x >= 50 ? "C-" : "-"
 grade = gradeOf(score)
 
 // ── SIGNAL GATING ───────────────────────────────────────────────────────────
-// Require: in session + score threshold + HTF not opposed + basic OF confirmed
-// Liquidity sweep OR recent sweep feeds into score; MSS/CHOCH is scored but
-// not a hard gate — this ensures 2+ signals fire per session on most days.
-
-// hard gates (non-negotiable)
-inSess    = inWin
+// --- Sweep / Structure path ---
 scoreOK   = score >= minScore
 htfNotOpp = not (htfBias == -1 and tDir == 1) and not (htfBias == 1 and tDir == -1)
+trigL     = (swL or recentSwL or bosU) and ofBull
+trigS     = (swH or recentSwH or bosD) and ofBear
 
-// at least one structural or liquidity trigger must exist
-trigL = (swL or recentSwL or bosU or orbBU) and ofBull
-trigS = (swH or recentSwH or bosD or orbBD) and ofBear
+sweepLong  = inWin and tDir == 1  and scoreOK and htfNotOpp and trigL and strategy.position_size <= 0
+sweepShort = inWin and tDir == -1 and scoreOK and htfNotOpp and trigS and strategy.position_size >= 0
 
-longSig  = inSess and tDir == 1  and scoreOK and htfNotOpp and trigL and strategy.position_size <= 0
-shortSig = inSess and tDir == -1 and scoreOK and htfNotOpp and trigS and strategy.position_size >= 0
+// --- ORB path (independent direction — the break itself defines direction) ---
+// HTF must not be directly opposed; no other gate needed since ORB is a
+// high-conviction institutional level. OF confirmation keeps quality high.
+orbHTFokL  = htfBias >= 0
+orbHTFokS  = htfBias <= 0
+orbLongSig  = inNY and orbBU and ofBull and orbHTFokL and strategy.position_size <= 0
+orbShortSig = inNY and orbBD and ofBear and orbHTFokS and strategy.position_size >= 0
+
+// combined
+longSig  = sweepLong  or orbLongSig
+shortSig = sweepShort or orbShortSig
 
 // ── RISK LEVELS ─────────────────────────────────────────────────────────────
 var float ePx  = na
@@ -327,12 +310,11 @@ var float spPx = na
 var float t1   = na
 var float t2   = na
 var float t3   = na
-var float rrV  = na
 
-getStop(d) =>
+// SL for sweep/structure entries: use sweep extreme if available, else current bar
+getSweepStop(d) =>
     float sv = na
     if d == 1
-        // SL below the sweep low, or below current low if no sweep
         float ref = not na(lastSwExL) ? math.min(lastSwExL, low) : low
         sv := ref * (1.0 - slBufPct / 100.0)
     else
@@ -340,33 +322,64 @@ getStop(d) =>
         sv := ref * (1.0 + slBufPct / 100.0)
     sv
 
-// ── TRADE EXECUTION ─────────────────────────────────────────────────────────
-var int nyT  = 0
-var int asT  = 0
-var float sR = 0.0
-var int cCt  = 0
+// SL for ORB entries: anchored to the ORB range boundary
+getOrbStop(d) =>
+    float sv = na
+    if d == 1
+        sv := nz(orbL, low) * (1.0 - slBufPct / 100.0)
+    else
+        sv := nz(orbH, high) * (1.0 + slBufPct / 100.0)
+    sv
 
-if longSig
+drawLevels(isLong) =>
+    float rr = math.abs(ePx - spPx)
+    t1 := isLong ? ePx + rr * tp1R : ePx - rr * tp1R
+    t2 := isLong ? ePx + rr * tp2R : ePx - rr * tp2R
+    t3 := isLong ? ePx + rr * tp3R : ePx - rr * tp3R
+
+// ── TRADE EXECUTION ─────────────────────────────────────────────────────────
+var int   nyT = 0
+var int   asT = 0
+var float sR  = 0.0
+var int   cCt = 0
+
+// ORB long entry
+if orbLongSig and not sweepLong
     ePx  := close
-    spPx := getStop(1)
-    rrV  := math.abs(ePx - spPx)
-    t1   := ePx + rrV * tp1R
-    t2   := ePx + rrV * tp2R
-    t3   := ePx + rrV * tp3R
-    strategy.entry("L", strategy.long,  comment="L " + grade)
+    spPx := getOrbStop(1)
+    drawLevels(true)
+    strategy.entry("ORB-L", strategy.long, comment="ORB-L " + grade)
+    strategy.exit("ORB-LX", "ORB-L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
+    if inNY
+        nyT += 1
+
+// ORB short entry
+if orbShortSig and not sweepShort
+    ePx  := close
+    spPx := getOrbStop(-1)
+    drawLevels(false)
+    strategy.entry("ORB-S", strategy.short, comment="ORB-S " + grade)
+    strategy.exit("ORB-SX", "ORB-S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
+    if inNY
+        nyT += 1
+
+// Sweep/structure long entry
+if sweepLong
+    ePx  := close
+    spPx := getSweepStop(1)
+    drawLevels(true)
+    strategy.entry("L", strategy.long, comment="L " + grade)
     strategy.exit("LX", "L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
         nyT += 1
     if inAS
         asT += 1
 
-if shortSig
+// Sweep/structure short entry
+if sweepShort
     ePx  := close
-    spPx := getStop(-1)
-    rrV  := math.abs(ePx - spPx)
-    t1   := ePx - rrV * tp1R
-    t2   := ePx - rrV * tp2R
-    t3   := ePx - rrV * tp3R
+    spPx := getSweepStop(-1)
+    drawLevels(false)
     strategy.entry("S", strategy.short, comment="S " + grade)
     strategy.exit("SX", "S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
@@ -385,27 +398,35 @@ if strategy.closedtrades > cCt
 // ── VISUALS ─────────────────────────────────────────────────────────────────
 if longSig or shortSig
     isL     = longSig
-    lbStyle = isL ? label.style_label_up   : label.style_label_down
+    isORB   = (orbLongSig and isL) or (orbShortSig and not isL)
+    lbStyle = isL ? label.style_label_up : label.style_label_down
     lbColor = isL ? cBull : cBear
     lbY     = isL ? low   : high
-    lbTxt   = (isL ? "▲ BUY " : "▼ SELL ") + grade + " (" + str.tostring(score) + ")"
+    pfx     = isORB ? "ORB " : ""
+    lbTxt   = (isL ? "▲ " : "▼ ") + pfx + (isL ? "BUY " : "SELL ") + grade + " (" + str.tostring(score) + ")"
     label.new(bar_index, lbY, lbTxt, style=lbStyle, color=lbColor, textcolor=color.white, size=size.normal)
-    line.new(bar_index, spPx, bar_index + 15, spPx, color=cBear, width=2, style=line.style_dotted)
-    line.new(bar_index, t1,   bar_index + 15, t1,   color=color.new(cBull, 40), width=1, style=line.style_dotted)
-    line.new(bar_index, t2,   bar_index + 15, t2,   color=color.new(cBull, 20), width=1, style=line.style_dotted)
-    line.new(bar_index, t3,   bar_index + 15, t3,   color=cBull, width=2, style=line.style_dotted)
+    // SL line — red, thick
+    line.new(bar_index, spPx, bar_index + 20, spPx, color=cBear, width=2, style=line.style_dotted)
+    // TP1 — faint green
+    line.new(bar_index, t1, bar_index + 20, t1, color=color.new(cBull, 55), width=1, style=line.style_dotted)
+    // TP2 — medium green
+    line.new(bar_index, t2, bar_index + 20, t2, color=color.new(cBull, 25), width=1, style=line.style_dotted)
+    // TP3 — solid green, thick
+    line.new(bar_index, t3, bar_index + 20, t3, color=cBull, width=2, style=line.style_solid)
 
 // ── ALERTS ──────────────────────────────────────────────────────────────────
-alertcondition(longSig  and score >= 70, "Long A+/A/B",  "SLS LONG")
-alertcondition(shortSig and score >= 70, "Short A+/A/B", "SLS SHORT")
-alertcondition(longSig,  "Long Any Grade",  "SLS LONG")
-alertcondition(shortSig, "Short Any Grade", "SLS SHORT")
+alertcondition(longSig  and score >= 70, "Long A+/A/B",    "SLS LONG")
+alertcondition(shortSig and score >= 70, "Short A+/A/B",   "SLS SHORT")
+alertcondition(orbLongSig,               "ORB Long",        "SLS ORB LONG")
+alertcondition(orbShortSig,              "ORB Short",       "SLS ORB SHORT")
+alertcondition(longSig,  "Long Any",  "SLS LONG")
+alertcondition(shortSig, "Short Any", "SLS SHORT")
 if longSig or shortSig
     string aD = longSig ? "BUY " : "SELL "
     string aM = aD + grade + " score=" + str.tostring(score) + " @ " + str.tostring(close)
     alert(aM, alert.freq_once_per_bar_close)
 
-// ── DASHBOARD ───────────────────────────────────────────────────────────────
+// ── DASHBOARD STRINGS + COLORS ──────────────────────────────────────────────
 float wR  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0
 float gP  = strategy.grossprofit
 float gL2 = strategy.grossloss
@@ -444,21 +465,21 @@ color c11 = swept ? cORB : cNeut
 if showDash and barstate.islast
     table.cell(dash, 0, 0, "SMART LIQUIDITY & STRUCTURE", text_color=color.white, bgcolor=color.new(#2962ff, 0), text_size=size.normal)
     table.cell(dash, 1, 0, aPlus ? "A+ ACTIVE" : "NO A+ SETUP", text_color=color.white, text_size=size.normal, bgcolor=aPlus ? cBull : color.new(#444444, 0))
-    dashRow(dash,  1, "HTF Bias",         d01, c01)
-    dashRow(dash,  2, "Session",           d02, c02)
-    dashRow(dash,  3, "Trade Direction",   d03, c03)
-    dashRow(dash,  4, "Trade Grade",       d04, c04)
-    dashRow(dash,  5, "Probability",       d05, c05)
-    dashRow(dash,  6, "Volume Delta",      d06, c06)
-    dashRow(dash,  7, "Relative Volume",   d07, c07)
-    dashRow(dash,  8, "ORB Status",        d08, cORB)
-    dashRow(dash,  9, "VWAP Status",       d09, c09)
-    dashRow(dash, 10, "Market Structure",  d10, c10)
-    dashRow(dash, 11, "Liquidity Sweep",   d11, c11)
-    dashRow(dash, 12, "Risk : Reward",     d12, cBull)
-    dashRow(dash, 13, "Win Rate / PF",     d13, cNeut)
-    dashRow(dash, 14, "MaxDD / Avg R",     d14, cNeut)
-    dashRow(dash, 15, "Trades NY / Asia",  d15, cNeut)
+    dashRow(dash,  1, "HTF Bias",        d01, c01)
+    dashRow(dash,  2, "Session",          d02, c02)
+    dashRow(dash,  3, "Trade Direction",  d03, c03)
+    dashRow(dash,  4, "Trade Grade",      d04, c04)
+    dashRow(dash,  5, "Probability",      d05, c05)
+    dashRow(dash,  6, "Volume Delta",     d06, c06)
+    dashRow(dash,  7, "Relative Volume",  d07, c07)
+    dashRow(dash,  8, "ORB Status",       d08, cORB)
+    dashRow(dash,  9, "VWAP Status",      d09, c09)
+    dashRow(dash, 10, "Market Structure", d10, c10)
+    dashRow(dash, 11, "Liquidity Sweep",  d11, c11)
+    dashRow(dash, 12, "Risk : Reward",    d12, cBull)
+    dashRow(dash, 13, "Win Rate / PF",    d13, cNeut)
+    dashRow(dash, 14, "MaxDD / Avg R",    d14, cNeut)
+    dashRow(dash, 15, "Trades NY / Asia", d15, cNeut)
 
 // ── SESSION BACKGROUND ───────────────────────────────────────────────────────
 bgcolor(inWin ? color.new(inNY ? #2962ff : #ff9800, 93) : na, title="Session BG")
