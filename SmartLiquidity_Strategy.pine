@@ -1,391 +1,526 @@
 //@version=6
 // Smart Liquidity & Structure Strategy (SLS)
-// HTF Bias + Liquidity + MSS/CHOCH + Order Flow + ORB + Scoring
-// Non-repainting — confirms on bar close. 2+ quality entries per session.
+// Institutional-grade entries based on HTF Bias, Liquidity Sweeps, Market Structure, Order Flow, ORB
+// Non-repainting: all signals confirm on bar close only — no lookahead bias
+
+// ── STRATEGY DECLARATION ──────────────────────────────────────────────────────
+// Define the strategy: overlay on price chart, no pyramiding, 2% equity per trade, 0.02% commission
 strategy("Smart Liquidity & Structure Strategy", shorttitle="SLS", overlay=true, pyramiding=0, initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=2, commission_type=strategy.commission.percent, commission_value=0.02, calc_on_every_tick=false, process_orders_on_close=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
-// ── INPUTS ──────────────────────────────────────────────────────────────────
-useNY    = input.bool(true,  "NY AM  09:30-11:30",       group="Sessions")
-useAS    = input.bool(true,  "Asia   19:00-00:00",        group="Sessions")
-tzI      = input.string("America/New_York", "Timezone",   group="Sessions")
-htf1     = input.timeframe("D",   "Daily",                group="HTF Bias")
-htf2     = input.timeframe("240", "4H",                   group="HTF Bias")
-htf3     = input.timeframe("60",  "1H",                   group="HTF Bias")
-pivLen   = input.int(5,    "Pivot Lookback",  minval=2,   group="Structure")
-liqLB    = input.int(30,   "Liq Lookback",   minval=5,   group="Liquidity")
-slBufPct = input.float(0.05,"SL Buffer %",   step=0.01,  group="Liquidity")
-rvolLen  = input.int(20,   "RVOL Length",    minval=2,   group="Order Flow")
-rvolMin  = input.float(1.1, "Min RVOL",      step=0.1,   group="Order Flow")
-useFVG   = input.bool(true, "Score FVG",                  group="FVG")
-minScore = input.int(50,   "Min Score",                   group="Grade")
-tp1R     = input.float(1.0, "TP1 R", step=0.5,           group="Risk")
-tp2R     = input.float(2.0, "TP2 R", step=0.5,           group="Risk")
-tp3R     = input.float(3.0, "TP3 R", step=0.5,           group="Risk")
-showDash = input.bool(true, "Dashboard",                   group="Display")
-showVWAP = input.bool(true, "VWAP",                        group="Display")
-showORB  = input.bool(true, "ORB Lines",                   group="Display")
-showLiq  = input.bool(true, "Sweep Labels",                group="Display")
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 1 — SESSION INPUTS
+// Controls which trading sessions are active and what timezone to use
+// ══════════════════════════════════════════════════════════════════════════════
+useNY = input.bool(true, "NY AM  09:30-11:30", group="Sessions")         // Toggle: enable/disable New York AM session entries
+useAS = input.bool(true, "Asia   19:00-00:00",  group="Sessions")         // Toggle: enable/disable Asia session entries
+tzI   = input.string("America/New_York", "Timezone", group="Sessions")    // Timezone string used for all session time() calls
 
-// ── COLORS ──────────────────────────────────────────────────────────────────
-cBull = color.new(#26a69a, 0)
-cBear = color.new(#ef5350, 0)
-cNeut = color.new(color.gray, 0)
-cVWAP = color.new(#2962ff, 0)
-cORB  = color.new(#ff9800, 0)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 2 — HTF BIAS INPUTS
+// Higher timeframe bias reads D/4H/1H trend to filter against counter-trend trades
+// ══════════════════════════════════════════════════════════════════════════════
+htf1 = input.timeframe("D",   "Daily", group="HTF Bias")   // Daily timeframe for top-level trend direction
+htf2 = input.timeframe("240", "4H",    group="HTF Bias")   // 4-hour timeframe for intermediate trend
+htf3 = input.timeframe("60",  "1H",    group="HTF Bias")   // 1-hour timeframe for near-term bias
 
-// ── DASHBOARD HELPER ────────────────────────────────────────────────────────
-var table dash = table.new(position.top_right, 2, 18, border_width=1, frame_color=color.gray, frame_width=1)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 3 — STRUCTURE INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+pivLen = input.int(5, "Pivot Lookback", minval=2, group="Structure")      // Number of bars left/right to confirm a swing high/low pivot
 
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 4 — LIQUIDITY INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+liqLB    = input.int(30,   "Liq Lookback", minval=5,  group="Liquidity")  // Bars back used to find rolling highest/lowest liquidity pools
+slBufPct = input.float(0.05, "SL Buffer %", step=0.01, group="Liquidity") // Extra % buffer added below/above stop-loss to avoid being stopped by spread
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — ORDER FLOW INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+rvolLen = input.int(20,   "RVOL Length", minval=2, group="Order Flow")    // Lookback period for calculating average volume (used in RVOL ratio)
+rvolMin = input.float(1.1, "Min RVOL",   step=0.1, group="Order Flow")   // Minimum relative volume required to qualify as elevated activity
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — FVG / GRADE / RISK INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+useFVG   = input.bool(true, "Score FVG",           group="FVG")           // Toggle: add 10 points to score when a Fair Value Gap is present
+minScore = input.int(50,    "Min Score",            group="Grade")         // Minimum score (out of ~100) required before a signal fires
+tp1R     = input.float(1.0, "TP1 R", step=0.5,    group="Risk")          // Take-profit 1 as a multiple of the initial risk (R)
+tp2R     = input.float(2.0, "TP2 R", step=0.5,    group="Risk")          // Take-profit 2 as a multiple of R
+tp3R     = input.float(3.0, "TP3 R", step=0.5,    group="Risk")          // Take-profit 3 as a multiple of R — also used as strategy.exit limit
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 7 — DISPLAY TOGGLE INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+showDash = input.bool(true, "Dashboard",     group="Display")             // Show/hide the stats dashboard table in the top-right corner
+showVWAP = input.bool(true, "VWAP",          group="Display")             // Show/hide the session-anchored VWAP line
+showORB  = input.bool(true, "ORB Lines",     group="Display")             // Show/hide the opening range high/low dashed lines
+showLiq  = input.bool(true, "Sweep Labels",  group="Display")             // Show/hide the "SSL swept" / "BSL swept" labels on chart
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 8 — COLOR CUSTOMIZATION INPUTS
+// Every visual element has its own color input so you can style the chart freely
+// ══════════════════════════════════════════════════════════════════════════════
+// --- Signal labels ---
+cBuyLabel  = input.color(color.new(#26a69a, 0),  "Buy Signal Label",    group="Colors – Signals")   // Color of the BUY arrow label printed on chart
+cSellLabel = input.color(color.new(#ef5350, 0),  "Sell Signal Label",   group="Colors – Signals")   // Color of the SELL arrow label printed on chart
+
+// --- Risk level lines ---
+cSLLine    = input.color(color.new(#ef5350, 0),  "Stop-Loss Line",      group="Colors – Levels")    // Color of the stop-loss dotted line drawn after each entry
+cTP1Line   = input.color(color.new(#26a69a, 55), "TP1 Line (faint)",    group="Colors – Levels")    // Color of Take-Profit 1 line (semi-transparent by default)
+cTP2Line   = input.color(color.new(#26a69a, 25), "TP2 Line (medium)",   group="Colors – Levels")    // Color of Take-Profit 2 line (medium opacity by default)
+cTP3Line   = input.color(color.new(#26a69a, 0),  "TP3 Line (solid)",    group="Colors – Levels")    // Color of Take-Profit 3 line (fully solid by default)
+
+// --- Indicator lines ---
+cVWAP      = input.color(color.new(#2962ff, 0),  "VWAP Line",           group="Colors – Indicators") // Color of the session-anchored VWAP line
+cORB       = input.color(color.new(#ff9800, 0),  "ORB High/Low Lines",  group="Colors – Indicators") // Color of the opening range breakout boundary lines
+
+// --- Liquidity sweep labels ---
+cSSLLabel  = input.color(color.new(#9c27b0, 30), "SSL Swept Label",     group="Colors – Liquidity") // Color of the "SSL swept" label (stop-hunt above equal highs)
+cBSLLabel  = input.color(color.new(#9c27b0, 30), "BSL Swept Label",     group="Colors – Liquidity") // Color of the "BSL swept" label (stop-hunt below equal lows)
+
+// --- Session background tints ---
+cNYBG      = input.color(color.new(#2962ff, 93), "NY Session BG",       group="Colors – Sessions")  // Background tint color during the New York AM session window
+cASBG      = input.color(color.new(#ff9800, 93), "Asia Session BG",     group="Colors – Sessions")  // Background tint color during the Asia session window
+
+// --- Dashboard cell colors ---
+cDashHdr   = input.color(color.new(#2962ff, 0),  "Dashboard Header BG", group="Colors – Dashboard") // Background color of the dashboard header row
+cDashKey   = input.color(color.new(#1e1e2e, 0),  "Dashboard Key Cell",  group="Colors – Dashboard") // Background color of the left (label) column cells
+cDashVal   = input.color(color.new(#2a2a3a, 0),  "Dashboard Value Cell",group="Colors – Dashboard") // Background color of the right (value) column cells
+cDashAPlus = input.color(color.new(#26a69a, 0),  "A+ Active Cell",      group="Colors – Dashboard") // Background color of the A+ alert cell when an A+ setup is active
+cDashNoSet = input.color(color.new(#444444, 0),  "No-Setup Cell",       group="Colors – Dashboard") // Background color of the A+ cell when no A+ setup is present
+
+// --- Grade label colors ---
+cGradeAPls = input.color(color.new(#00e676, 0),  "Grade A+ Color",      group="Colors – Grades")    // Text/indicator color when score >= 90 (A+ grade)
+cGradeA    = input.color(color.new(#26a69a, 0),  "Grade A Color",       group="Colors – Grades")    // Text/indicator color when score >= 80 (A grade)
+cGradeB    = input.color(color.new(#ff9800, 0),  "Grade B Color",       group="Colors – Grades")    // Text/indicator color when score >= 70 (B grade)
+cGradeC    = input.color(color.new(#9e9e9e, 0),  "Grade C/C- Color",    group="Colors – Grades")    // Text/indicator color when score >= 50 (C/C- grade)
+
+// --- General semantic colors (used in scoring logic and dashboard) ---
+cBull = cBuyLabel                                  // Alias: bullish color = buy label color (used throughout for consistency)
+cBear = cSellLabel                                 // Alias: bearish color = sell label color
+cNeut = color.new(color.gray, 0)                   // Neutral gray for dashboard cells that have no directional bias
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 9 — DASHBOARD TABLE INITIALIZATION
+// ══════════════════════════════════════════════════════════════════════════════
+var table dash = table.new(position.top_right, 2, 18, border_width=1, frame_color=color.gray, frame_width=1) // Create 2-column, 18-row table pinned to top-right of chart
+
+// dashRow: helper function — fills one row of the dashboard with a key label and colored value
+// Parameters: t=table, i=row index, k=key text, v=value text, vc=value text color
 dashRow(t, i, k, v, vc) =>
-    table.cell(t, 0, i, k, text_color=color.white, text_size=size.small, bgcolor=color.new(#1e1e2e, 0), text_halign=text.align_left)
-    table.cell(t, 1, i, v, text_color=vc,          text_size=size.small, bgcolor=color.new(#2a2a3a, 0), text_halign=text.align_right)
+    table.cell(t, 0, i, k, text_color=color.white, text_size=size.small, bgcolor=cDashKey, text_halign=text.align_left)   // Left cell: key label with dark background
+    table.cell(t, 1, i, v, text_color=vc,          text_size=size.small, bgcolor=cDashVal, text_halign=text.align_right)  // Right cell: colored value with slightly lighter background
 
-// ── SESSIONS ────────────────────────────────────────────────────────────────
-inNY  = not na(time(timeframe.period, "0930-1130", tzI))
-inAS  = not na(time(timeframe.period, "1900-0000", tzI))
-inWin = (useNY and inNY) or (useAS and inAS)
-newNY = inNY and not inNY[1]
-newS  = (inNY and not inNY[1]) or (inAS and not inAS[1])
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 10 — SESSION DETECTION
+// Determines whether we are inside a tradeable session window
+// ══════════════════════════════════════════════════════════════════════════════
+inNY  = not na(time(timeframe.period, "0930-1130", tzI))         // true if current bar is inside NY AM session (9:30–11:30)
+inAS  = not na(time(timeframe.period, "1900-0000", tzI))         // true if current bar is inside Asia session (19:00–00:00)
+inWin = (useNY and inNY) or (useAS and inAS)                     // true if we are in any active trading window
+newNY = inNY and not inNY[1]                                     // true only on the first bar of each NY session (used to reset ORB)
+newS  = (inNY and not inNY[1]) or (inAS and not inAS[1])         // true on the first bar of any new session (used to reset VWAP)
 
-var string sessName = "OFF-SESSION"
-if inNY
-    sessName := "NY AM"
-else if inAS
-    sessName := "ASIA"
-else
-    sessName := "OFF-SESSION"
+var string sessName = "OFF-SESSION"                              // Persistent variable to track current session name for dashboard display
+if inNY                                                          // If inside NY AM window...
+    sessName := "NY AM"                                          //   ...label as "NY AM"
+else if inAS                                                     // Else if inside Asia window...
+    sessName := "ASIA"                                           //   ...label as "ASIA"
+else                                                             // Otherwise...
+    sessName := "OFF-SESSION"                                    //   ...label as off-session
 
-// ── SESSION-ANCHORED VWAP ───────────────────────────────────────────────────
-var float vN = na
-var float vD = na
-if newS
-    vN := 0.0
-    vD := 0.0
-vN     := nz(vN) + hlc3 * volume
-vD     := nz(vD) + volume
-vwap   = vD > 0 ? vN / vD : close
-vwBull = close > vwap
-plot(showVWAP ? vwap : na, "VWAP", color=cVWAP, linewidth=2)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 11 — SESSION-ANCHORED VWAP
+// VWAP resets at the start of each new session; not the daily VWAP
+// ══════════════════════════════════════════════════════════════════════════════
+var float vN = na    // Numerator accumulator: sum of (price × volume) since session open
+var float vD = na    // Denominator accumulator: sum of volume since session open
 
-// ── HTF BIAS ────────────────────────────────────────────────────────────────
+if newS              // On the first bar of each new session, reset both accumulators
+    vN := 0.0        //   Reset price×volume sum to zero
+    vD := 0.0        //   Reset volume sum to zero
+
+vN   := nz(vN) + hlc3 * volume                  // Add this bar's (high+low+close)/3 × volume to numerator
+vD   := nz(vD) + volume                          // Add this bar's volume to denominator
+vwap  = vD > 0 ? vN / vD : close                // VWAP = cumulative typical price × volume ÷ cumulative volume
+vwBull = close > vwap                            // true if price is currently trading above VWAP (bullish context)
+plot(showVWAP ? vwap : na, "VWAP", color=cVWAP, linewidth=2)  // Draw the VWAP line (hidden when showVWAP is off)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 12 — HTF BIAS ENGINE
+// Reads trend on Daily, 4H, and 1H — returns +1 (bull), -1 (bear), or 0 (neutral)
+// Uses lookahead_off so there is ZERO future-bar bias (non-repainting)
+// ══════════════════════════════════════════════════════════════════════════════
 htfBias1(tf) =>
-    c  = request.security(syminfo.tickerid, tf, close,   lookahead=barmerge.lookahead_off)
-    ph = request.security(syminfo.tickerid, tf, high[1], lookahead=barmerge.lookahead_off)
-    pl = request.security(syminfo.tickerid, tf, low[1],  lookahead=barmerge.lookahead_off)
-    int b = 0
-    if c > ph
-        b := 1
-    else if c < pl
-        b := -1
-    b
+    c  = request.security(syminfo.tickerid, tf, close,   lookahead=barmerge.lookahead_off)   // Pull the close of the current HTF bar (no lookahead)
+    ph = request.security(syminfo.tickerid, tf, high[1], lookahead=barmerge.lookahead_off)   // Pull the HIGH of the previous closed HTF bar
+    pl = request.security(syminfo.tickerid, tf, low[1],  lookahead=barmerge.lookahead_off)   // Pull the LOW of the previous closed HTF bar
+    int b = 0                    // Default: neutral (0)
+    if c > ph                    // If current close is above previous bar's high → bullish break
+        b := 1                   //   Return +1
+    else if c < pl               // If current close is below previous bar's low → bearish break
+        b := -1                  //   Return -1
+    b                            // Return the bias value
 
-bD  = htfBias1(htf1)
-b4H = htfBias1(htf2)
-b1H = htfBias1(htf3)
-htfSum  = bD + b4H + b1H
-htfBias = htfSum > 0 ? 1 : htfSum < 0 ? -1 : 0
+bD  = htfBias1(htf1)                                   // Daily bias: +1, 0, or -1
+b4H = htfBias1(htf2)                                   // 4H bias: +1, 0, or -1
+b1H = htfBias1(htf3)                                   // 1H bias: +1, 0, or -1
+htfSum  = bD + b4H + b1H                               // Sum of all three timeframes (-3 to +3)
+htfBias = htfSum > 0 ? 1 : htfSum < 0 ? -1 : 0        // Composite bias: majority rules; 0 if split
 
-var string htfTxt = "NEUTRAL"
-if htfBias == 1
-    htfTxt := "BULLISH"
-else if htfBias == -1
-    htfTxt := "BEARISH"
-else
-    htfTxt := "NEUTRAL"
+var string htfTxt = "NEUTRAL"    // Persistent text label for dashboard display
+if htfBias == 1                  // If composite bias is bullish...
+    htfTxt := "BULLISH"          //   ...show "BULLISH"
+else if htfBias == -1            // If composite bias is bearish...
+    htfTxt := "BEARISH"          //   ...show "BEARISH"
+else                             // Otherwise...
+    htfTxt := "NEUTRAL"          //   ...show "NEUTRAL"
 
-// ── MARKET STRUCTURE ────────────────────────────────────────────────────────
-phV = ta.pivothigh(high, pivLen, pivLen)
-plV = ta.pivotlow(low,   pivLen, pivLen)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 13 — MARKET STRUCTURE
+// Detects swing highs/lows, HH/HL/LH/LL labels, Break of Structure (BOS),
+// Change of Character (CHOCH), and Market Structure Shift (MSS)
+// ══════════════════════════════════════════════════════════════════════════════
+phV = ta.pivothigh(high, pivLen, pivLen)   // Confirmed pivot high: high is highest in pivLen bars left AND right
+plV = ta.pivotlow(low,   pivLen, pivLen)   // Confirmed pivot low: low is lowest in pivLen bars left AND right
 
-var float lPH = na
-var float pPH = na
-var float lPL = na
-var float pPL = na
-var int   trD = 0
-var string swT = "N/A"
+var float lPH = na    // Last confirmed pivot high price
+var float pPH = na    // Previous confirmed pivot high price (used to classify HH vs LH)
+var float lPL = na    // Last confirmed pivot low price
+var float pPL = na    // Previous confirmed pivot low price (used to classify HL vs LL)
+var int   trD = 0     // Trend direction: +1 = uptrend, -1 = downtrend, 0 = ranging
+var string swT = "N/A" // Swing type label: "HH", "HL", "LH", or "LL"
 
-if not na(phV)
-    pPH := lPH
-    lPH := phV
-    swT := (not na(pPH) and phV > pPH) ? "HH" : "LH"
-if not na(plV)
-    pPL := lPL
-    lPL := plV
-    swT := (not na(pPL) and plV > pPL) ? "HL" : "LL"
+if not na(phV)                                          // When a new pivot high is confirmed...
+    pPH := lPH                                          //   Archive the previous high
+    lPH := phV                                          //   Store the new pivot high
+    swT := (not na(pPH) and phV > pPH) ? "HH" : "LH"  //   Higher High if new high > old high, else Lower High
 
-bosU  = not na(lPH) and close > lPH and close[1] <= lPH
-bosD  = not na(lPL) and close < lPL and close[1] >= lPL
-choch = (trD <= 0 and bosU) or (trD >= 0 and bosD)
-mss   = bosU or bosD
+if not na(plV)                                          // When a new pivot low is confirmed...
+    pPL := lPL                                          //   Archive the previous low
+    lPL := plV                                          //   Store the new pivot low
+    swT := (not na(pPL) and plV > pPL) ? "HL" : "LL"  //   Higher Low if new low > old low, else Lower Low
 
-if bosU
-    trD := 1
-if bosD
-    trD := -1
+bosU  = not na(lPH) and close > lPH and close[1] <= lPH   // Bullish BOS: close crosses above last pivot high for the first time
+bosD  = not na(lPL) and close < lPL and close[1] >= lPL   // Bearish BOS: close crosses below last pivot low for the first time
+choch = (trD <= 0 and bosU) or (trD >= 0 and bosD)        // CHOCH: BOS that goes AGAINST the current trend direction (reversal signal)
+mss   = bosU or bosD                                       // MSS: any break of structure (bullish or bearish)
 
-var string strTxt = "RANGING"
-if trD == 1
-    strTxt := "BULLISH (" + swT + ")"
-else if trD == -1
-    strTxt := "BEARISH (" + swT + ")"
-else
-    strTxt := "RANGING"
+if bosU     // If bullish break of structure...
+    trD := 1  //   Switch trend direction to uptrend
+if bosD     // If bearish break of structure...
+    trD := -1 //   Switch trend direction to downtrend
 
-// ── LIQUIDITY MODEL ─────────────────────────────────────────────────────────
-pdH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
-pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
-hh  = ta.highest(high, liqLB)
-ll  = ta.lowest(low,   liqLB)
+var string strTxt = "RANGING"                           // Persistent market structure label for dashboard
+if trD == 1                                             // In an uptrend...
+    strTxt := "BULLISH (" + swT + ")"                  //   Show bullish + last swing type (e.g. "BULLISH (HH)")
+else if trD == -1                                       // In a downtrend...
+    strTxt := "BEARISH (" + swT + ")"                  //   Show bearish + last swing type (e.g. "BEARISH (LL)")
+else                                                    // Otherwise...
+    strTxt := "RANGING"                                 //   No clear trend
 
-var float sHi = na
-var float sLo = na
-if newS
-    sHi := high
-    sLo := low
-else
-    sHi := math.max(nz(sHi, high), high)
-    sLo := math.min(nz(sLo, low),  low)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 14 — LIQUIDITY MODEL
+// Identifies buy-side and sell-side liquidity pools, then detects sweeps
+// A sweep = wick through the pool AND close back inside (stop-hunt confirmed)
+// ══════════════════════════════════════════════════════════════════════════════
+pdH = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)  // Previous day's high (sell-side liquidity above equal highs)
+pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)  // Previous day's low (buy-side liquidity below equal lows)
+hh  = ta.highest(high, liqLB)   // Rolling highest high over liqLB bars (resistance / BSL pool)
+ll  = ta.lowest(low,   liqLB)   // Rolling lowest low over liqLB bars (support / SSL pool)
 
-lRH = math.max(math.max(nz(pdH, hh), hh), nz(sHi, hh))
-lRL = math.min(math.min(nz(pdL, ll), ll), nz(sLo, ll))
+var float sHi = na    // Session high: tracks the highest high since session open
+var float sLo = na    // Session low: tracks the lowest low since session open
 
-swH   = high > lRH and close < lRH
-swL   = low  < lRL and close > lRL
-swept = swH or swL
+if newS                                         // On first bar of new session, reset session extremes
+    sHi := high                                 //   Session high starts at this bar's high
+    sLo := low                                  //   Session low starts at this bar's low
+else                                            // On all subsequent session bars...
+    sHi := math.max(nz(sHi, high), high)       //   Expand session high if this bar made a new high
+    sLo := math.min(nz(sLo, low),  low)        //   Expand session low if this bar made a new low
 
-var bool recentSwH = false
-var bool recentSwL = false
-if swH
-    recentSwH := true
-    recentSwL := false
-if swL
-    recentSwL := true
-    recentSwH := false
-if ta.barssince(swH) > 6
-    recentSwH := false
-if ta.barssince(swL) > 6
-    recentSwL := false
+lRH = math.max(math.max(nz(pdH, hh), hh), nz(sHi, hh))   // Combined sell-side liquidity pool: max of prev-day high, rolling high, session high
+lRL = math.min(math.min(nz(pdL, ll), ll), nz(sLo, ll))    // Combined buy-side liquidity pool: min of prev-day low, rolling low, session low
 
-var float lastSwExH = na
-var float lastSwExL = na
-if swH
+swH   = high > lRH and close < lRH   // Sell-side sweep: wick above the pool but close back inside (stop-hunt above)
+swL   = low  < lRL and close > lRL   // Buy-side sweep: wick below the pool but close back inside (stop-hunt below)
+swept = swH or swL                    // true if any sweep occurred this bar
+
+// Recent sweep memory — keeps the sweep signal "alive" for up to 6 bars
+// This allows an MSS that follows a sweep (even on a slightly later bar) to still qualify
+var bool recentSwH = false    // Persistent: was there a sell-side sweep within the last 6 bars?
+var bool recentSwL = false    // Persistent: was there a buy-side sweep within the last 6 bars?
+
+if swH                         // If a sell-side sweep just occurred...
+    recentSwH := true          //   Activate the sell-side sweep memory
+    recentSwL := false         //   Clear the buy-side sweep memory (direction flip)
+if swL                         // If a buy-side sweep just occurred...
+    recentSwL := true          //   Activate the buy-side sweep memory
+    recentSwH := false         //   Clear the sell-side sweep memory (direction flip)
+if ta.barssince(swH) > 6       // If it has been more than 6 bars since the last sell-side sweep...
+    recentSwH := false         //   Expire the sell-side sweep memory
+if ta.barssince(swL) > 6       // If it has been more than 6 bars since the last buy-side sweep...
+    recentSwL := false         //   Expire the buy-side sweep memory
+
+var float lastSwExH = na    // Persistent: the wick high of the most recent sell-side sweep (used as SL reference)
+var float lastSwExL = na    // Persistent: the wick low of the most recent buy-side sweep (used as SL reference)
+if swH                      // On a sell-side sweep, save the wick high for stop-loss calculation
     lastSwExH := high
-if swL
+if swL                      // On a buy-side sweep, save the wick low for stop-loss calculation
     lastSwExL := low
 
+// Print labels on chart when liquidity sweeps occur (only if showLiq is enabled)
 if showLiq and swH
-    label.new(bar_index, high, "SSL swept", style=label.style_label_down, color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, high, "SSL swept", style=label.style_label_down, color=cSSLLabel, textcolor=color.white, size=size.tiny)  // SSL = Sell-Side Liquidity taken (bearish stop-hunt above highs)
 if showLiq and swL
-    label.new(bar_index, low,  "BSL swept", style=label.style_label_up,   color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
+    label.new(bar_index, low,  "BSL swept", style=label.style_label_up,   color=cBSLLabel, textcolor=color.white, size=size.tiny)  // BSL = Buy-Side Liquidity taken (bullish stop-hunt below lows)
 
-// ── ORDER FLOW ───────────────────────────────────────────────────────────────
-rng    = high - low
-bVol   = rng > 0 ? volume * (close - low)  / rng : volume * 0.5
-sVol   = rng > 0 ? volume * (high - close) / rng : volume * 0.5
-vDelta = bVol - sVol
-rvol   = volume / math.max(ta.sma(volume, rvolLen), 1e-9)
-atr14  = ta.atr(14)
-body   = math.abs(close - open)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 15 — ORDER FLOW
+// Estimates buying vs selling pressure using volume distribution (delta proxy)
+// and relative volume (RVOL) to confirm strong institutional participation
+// ══════════════════════════════════════════════════════════════════════════════
+rng    = high - low                                                        // Total bar range (high minus low)
+bVol   = rng > 0 ? volume * (close - low)  / rng : volume * 0.5          // Estimated buying volume: portion of volume near the high (close proximity to high = bullish pressure)
+sVol   = rng > 0 ? volume * (high - close) / rng : volume * 0.5          // Estimated selling volume: portion of volume near the low (close proximity to low = bearish pressure)
+vDelta = bVol - sVol                                                       // Volume delta: positive = net buying, negative = net selling
+rvol   = volume / math.max(ta.sma(volume, rvolLen), 1e-9)                 // Relative volume: current volume ÷ average volume (1.0 = average, 2.0 = twice normal)
+atr14  = ta.atr(14)                                                        // Average True Range over 14 bars (measures volatility for displacement detection)
+body   = math.abs(close - open)                                            // Absolute size of the candle body (close - open)
 
-dispBull = body > atr14 * 1.5 and close > open and rvol >= rvolMin
-dispBear = body > atr14 * 1.5 and close < open and rvol >= rvolMin
-ofBull   = vDelta > 0 and rvol >= rvolMin
-ofBear   = vDelta < 0 and rvol >= rvolMin
-sofBull  = ofBull and dispBull
-sofBear  = ofBear and dispBear
+dispBull = body > atr14 * 1.5 and close > open and rvol >= rvolMin   // Bullish displacement: large green candle (>1.5× ATR) with elevated volume
+dispBear = body > atr14 * 1.5 and close < open and rvol >= rvolMin   // Bearish displacement: large red candle (>1.5× ATR) with elevated volume
+ofBull   = vDelta > 0 and rvol >= rvolMin                             // Basic bullish order flow: net buying + elevated volume
+ofBear   = vDelta < 0 and rvol >= rvolMin                             // Basic bearish order flow: net selling + elevated volume
+sofBull  = ofBull and dispBull                                        // Strong bullish order flow: net buying + displacement (highest quality bullish bar)
+sofBear  = ofBear and dispBear                                        // Strong bearish order flow: net selling + displacement (highest quality bearish bar)
 
-// ── FAIR VALUE GAP ──────────────────────────────────────────────────────────
-fvgB  = useFVG and low  > high[2]
-fvgBr = useFVG and high < low[2]
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 16 — FAIR VALUE GAP (FVG)
+// A gap between candle[2] and candle[0] where the middle candle[1] had extreme range
+// Indicates an area price is likely to return to and use as support/resistance
+// ══════════════════════════════════════════════════════════════════════════════
+fvgB  = useFVG and low  > high[2]   // Bullish FVG: current candle's low is above the high from 2 bars ago (gap up — unfilled space below price)
+fvgBr = useFVG and high < low[2]    // Bearish FVG: current candle's high is below the low from 2 bars ago (gap down — unfilled space above price)
 
-// ── OPENING RANGE BREAKOUT ──────────────────────────────────────────────────
-// Build the 15-min opening range for NY AM only
-inORBwin = not na(time(timeframe.period, "0930-0945", tzI))
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 17 — OPENING RANGE BREAKOUT (ORB)
+// Builds the first 15-min range of NY AM (9:30–9:45) and detects breakouts
+// ORB breakout is its own independent signal path — does not require a sweep
+// ══════════════════════════════════════════════════════════════════════════════
+inORBwin = not na(time(timeframe.period, "0930-0945", tzI))   // true if current bar is inside the 15-min ORB build window (9:30–9:45 NY time)
 
-var float orbH  = na
-var float orbL  = na
-var bool  orbOK = false
+var float orbH  = na       // Persistent: high of the opening range (expands during the 15-min build window)
+var float orbL  = na       // Persistent: low of the opening range (shrinks during the 15-min build window)
+var bool  orbOK = false    // Persistent: true once the ORB window has closed and the range is locked
 
-if newNY
-    orbH  := high
-    orbL  := low
-    orbOK := false
-else if inORBwin
-    orbH := math.max(nz(orbH, high), high)
-    orbL := math.min(nz(orbL, low),  low)
-else if inNY and not inORBwin
-    orbOK := true
+if newNY                            // At the start of a new NY session, reset the ORB
+    orbH  := high                   //   Start building from this bar's high
+    orbL  := low                    //   Start building from this bar's low
+    orbOK := false                  //   Mark range as not yet confirmed
+else if inORBwin                    // While still inside the 15-min build window...
+    orbH := math.max(nz(orbH, high), high)   //   Expand range high if this bar sets a new high
+    orbL := math.min(nz(orbL, low),  low)    //   Expand range low if this bar sets a new low
+else if inNY and not inORBwin       // Once we are in NY session but past the 15-min window...
+    orbOK := true                   //   Lock the ORB — range is now confirmed and ready to trade
 
-// ORB breakout: close crosses outside the range on a confirmed bar
-orbBU = orbOK and not na(orbH) and not na(orbL) and close > orbH and close[1] <= orbH
-orbBD = orbOK and not na(orbH) and not na(orbL) and close < orbL  and close[1] >= orbL
+// ORB breakout: close crosses outside the locked range on a confirmed bar close
+orbBU = orbOK and not na(orbH) and not na(orbL) and close > orbH and close[1] <= orbH   // Bullish ORB break: first close above the range high
+orbBD = orbOK and not na(orbH) and not na(orbL) and close < orbL  and close[1] >= orbL  // Bearish ORB break: first close below the range low
 
-var string orbTxt = "N/A"
-if not orbOK and inNY
-    orbTxt := "FORMING"
-else if orbBU
-    orbTxt := "BROKEN UP"
-else if orbBD
-    orbTxt := "BROKEN DOWN"
-else if orbOK
-    orbTxt := "SET"
-else
-    orbTxt := "N/A"
+var string orbTxt = "N/A"       // Persistent ORB status label for dashboard display
+if not orbOK and inNY           // During the NY session but ORB not yet locked...
+    orbTxt := "FORMING"         //   Range is still being built
+else if orbBU                   // If bullish breakout just confirmed...
+    orbTxt := "BROKEN UP"       //   Show "BROKEN UP"
+else if orbBD                   // If bearish breakout just confirmed...
+    orbTxt := "BROKEN DOWN"     //   Show "BROKEN DOWN"
+else if orbOK                   // If ORB is locked but no breakout yet...
+    orbTxt := "SET"             //   Show "SET" (waiting for a break)
+else                            // Otherwise (not in NY, no ORB data)...
+    orbTxt := "N/A"             //   Show "N/A"
 
-// draw ORB levels every bar once set (overwrite to extend them)
+// Draw ORB high and low lines as dashed horizontal lines extending rightward each bar
 if showORB and orbOK and not na(orbH)
-    line.new(bar_index - 1, orbH, bar_index, orbH, color=cORB, style=line.style_dashed, width=1)
-    line.new(bar_index - 1, orbL, bar_index, orbL,  color=cORB, style=line.style_dashed, width=1)
+    line.new(bar_index - 1, orbH, bar_index, orbH, color=cORB, style=line.style_dashed, width=1)   // ORB high level line
+    line.new(bar_index - 1, orbL, bar_index, orbL, color=cORB, style=line.style_dashed, width=1)   // ORB low level line
 
-// ── SCORING ENGINE ──────────────────────────────────────────────────────────
-sL = 0
-if htfBias == 1
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 18 — SCORING ENGINE
+// Scores each bar 0–100+ for both long and short setups independently
+// Points are awarded for each confluence factor that is present
+// ══════════════════════════════════════════════════════════════════════════════
+
+// --- Long score accumulation ---
+sL = 0                              // Initialize long score to zero
+if htfBias == 1                     // +25 pts: Daily/4H/1H composite bias is bullish (highest-weight filter)
     sL += 25
-if swL or recentSwL
+if swL or recentSwL                 // +20 pts: Buy-side liquidity was swept (stop-hunt below lows = smart money entry zone)
     sL += 20
-if ofBull
+if ofBull                           // +15 pts: Net buying volume with elevated RVOL (order flow confirmation)
     sL += 15
-if sofBull
+if sofBull                          // +5 pts bonus: Displacement candle on top of order flow (institutional conviction)
     sL += 5
-if (mss or choch) and trD == 1
+if (mss or choch) and trD == 1      // +15 pts: Market structure shifted bullish after sweep (BOS/CHOCH)
     sL += 15
-if fvgB
+if fvgB                             // +10 pts: Bullish Fair Value Gap present (institutional imbalance to fill)
     sL += 10
-if vwBull
+if vwBull                           // +10 pts: Price is trading above VWAP (bullish intraday context)
     sL += 10
-if orbBU
+if orbBU                            // +20 pts: ORB breakout to the upside (strong opening range momentum)
     sL += 20
 
-sS = 0
-if htfBias == -1
+// --- Short score accumulation ---
+sS = 0                              // Initialize short score to zero
+if htfBias == -1                    // +25 pts: Composite bias is bearish
     sS += 25
-if swH or recentSwH
+if swH or recentSwH                 // +20 pts: Sell-side liquidity was swept (stop-hunt above highs = smart money entry zone)
     sS += 20
-if ofBear
+if ofBear                           // +15 pts: Net selling volume with elevated RVOL
     sS += 15
-if sofBear
+if sofBear                          // +5 pts bonus: Displacement candle confirming bearish order flow
     sS += 5
-if (mss or choch) and trD == -1
+if (mss or choch) and trD == -1     // +15 pts: Market structure shifted bearish after sweep
     sS += 15
-if fvgBr
+if fvgBr                            // +10 pts: Bearish Fair Value Gap present
     sS += 10
-if not vwBull
+if not vwBull                       // +10 pts: Price is trading below VWAP (bearish intraday context)
     sS += 10
-if orbBD
+if orbBD                            // +20 pts: ORB breakout to the downside
     sS += 20
 
-// ── DIRECTION + GRADE ───────────────────────────────────────────────────────
-tDir  = sL >= sS ? 1 : -1
-score = math.max(sL, sS)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 19 — DIRECTION + GRADE
+// ══════════════════════════════════════════════════════════════════════════════
+tDir  = sL >= sS ? 1 : -1    // Trade direction: long if long score >= short score, else short
+score = math.max(sL, sS)     // Final score = the higher of the two scores (best qualifying side)
 
+// gradeOf: converts a numeric score into a letter grade
 gradeOf(x) =>
     x >= 90 ? "A+" : x >= 80 ? "A" : x >= 70 ? "B" : x >= 60 ? "C" : x >= 50 ? "C-" : "-"
-grade = gradeOf(score)
 
-// ── SIGNAL GATING ───────────────────────────────────────────────────────────
+grade = gradeOf(score)    // Letter grade for the current bar's best setup quality
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 20 — SIGNAL GATING
+// Two independent signal paths: sweep/structure path and ORB path
+// HTF opposition (e.g. bullish bias + short setup) blocks the trade
+// ══════════════════════════════════════════════════════════════════════════════
+
 // --- Sweep / Structure path ---
-scoreOK   = score >= minScore
-htfNotOpp = not (htfBias == -1 and tDir == 1) and not (htfBias == 1 and tDir == -1)
-trigL     = (swL or recentSwL or bosU) and ofBull
-trigS     = (swH or recentSwH or bosD) and ofBear
+scoreOK   = score >= minScore                                                           // Score must meet the minimum threshold set in inputs
+htfNotOpp = not (htfBias == -1 and tDir == 1) and not (htfBias == 1 and tDir == -1)   // Ensure HTF bias is NOT directly opposed to trade direction
+trigL     = (swL or recentSwL or bosU) and ofBull                                      // Long trigger: sweep or BOS occurred AND buying order flow is present
+trigS     = (swH or recentSwH or bosD) and ofBear                                      // Short trigger: sweep or BOS occurred AND selling order flow is present
 
-sweepLong  = inWin and tDir == 1  and scoreOK and htfNotOpp and trigL and strategy.position_size <= 0
-sweepShort = inWin and tDir == -1 and scoreOK and htfNotOpp and trigS and strategy.position_size >= 0
+sweepLong  = inWin and tDir == 1  and scoreOK and htfNotOpp and trigL and strategy.position_size <= 0   // Fire long sweep signal only when in session, scored, and not already long
+sweepShort = inWin and tDir == -1 and scoreOK and htfNotOpp and trigS and strategy.position_size >= 0   // Fire short sweep signal only when in session, scored, and not already short
 
-// --- ORB path (independent direction — the break itself defines direction) ---
-// HTF must not be directly opposed; no other gate needed since ORB is a
-// high-conviction institutional level. OF confirmation keeps quality high.
-orbHTFokL  = htfBias >= 0
-orbHTFokS  = htfBias <= 0
-orbLongSig  = inNY and orbBU and ofBull and orbHTFokL and strategy.position_size <= 0
-orbShortSig = inNY and orbBD and ofBear and orbHTFokS and strategy.position_size >= 0
+// --- ORB path (independent — the break itself defines direction, no tDir needed) ---
+// HTF must not be directly opposed; OF confirmation keeps quality high
+orbHTFokL  = htfBias >= 0     // ORB long allowed when HTF is neutral or bullish (not bearish)
+orbHTFokS  = htfBias <= 0     // ORB short allowed when HTF is neutral or bearish (not bullish)
+orbLongSig  = inNY and orbBU and ofBull and orbHTFokL and strategy.position_size <= 0   // ORB long: bullish break + buying OF + HTF not opposed + no existing long
+orbShortSig = inNY and orbBD and ofBear and orbHTFokS and strategy.position_size >= 0   // ORB short: bearish break + selling OF + HTF not opposed + no existing short
 
-// combined
-longSig  = sweepLong  or orbLongSig
-shortSig = sweepShort or orbShortSig
+// Combined final signals (either path can trigger)
+longSig  = sweepLong  or orbLongSig    // Any long condition (sweep/structure or ORB)
+shortSig = sweepShort or orbShortSig   // Any short condition (sweep/structure or ORB)
 
-// ── RISK LEVELS ─────────────────────────────────────────────────────────────
-var float ePx  = na
-var float spPx = na
-var float t1   = na
-var float t2   = na
-var float t3   = na
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 21 — STOP-LOSS CALCULATION FUNCTIONS
+// getSweepStop: SL anchored to the sweep extreme (or current bar low/high if no sweep)
+// getOrbStop: SL anchored to the ORB range boundary (orbL for longs, orbH for shorts)
+// ══════════════════════════════════════════════════════════════════════════════
+var float ePx  = na    // Entry price of the most recent trade (persistent)
+var float spPx = na    // Stop-loss price of the most recent trade (persistent)
+var float t1   = na    // Take-profit 1 level (persistent, updated each entry)
+var float t2   = na    // Take-profit 2 level (persistent, updated each entry)
+var float t3   = na    // Take-profit 3 level (persistent, updated each entry)
 
-// SL for sweep/structure entries: use sweep extreme if available, else current bar
+// getSweepStop: Returns the stop price for sweep/structure entries
+// d=1 → long SL (below swing low); d=-1 → short SL (above swing high)
 getSweepStop(d) =>
     float sv = na
     if d == 1
-        float ref = not na(lastSwExL) ? math.min(lastSwExL, low) : low
-        sv := ref * (1.0 - slBufPct / 100.0)
+        float ref = not na(lastSwExL) ? math.min(lastSwExL, low) : low   // Use the lower of: sweep wick low vs. current bar low
+        sv := ref * (1.0 - slBufPct / 100.0)                             // Apply buffer below to avoid being stopped by spread/noise
     else
-        float ref = not na(lastSwExH) ? math.max(lastSwExH, high) : high
-        sv := ref * (1.0 + slBufPct / 100.0)
+        float ref = not na(lastSwExH) ? math.max(lastSwExH, high) : high // Use the higher of: sweep wick high vs. current bar high
+        sv := ref * (1.0 + slBufPct / 100.0)                             // Apply buffer above
     sv
 
-// SL for ORB entries: anchored to the ORB range boundary
+// getOrbStop: Returns the stop price for ORB entries
+// d=1 → long SL (at ORB low); d=-1 → short SL (at ORB high)
 getOrbStop(d) =>
     float sv = na
     if d == 1
-        sv := nz(orbL, low) * (1.0 - slBufPct / 100.0)
+        sv := nz(orbL, low)  * (1.0 - slBufPct / 100.0)    // SL just below the ORB low boundary
     else
-        sv := nz(orbH, high) * (1.0 + slBufPct / 100.0)
+        sv := nz(orbH, high) * (1.0 + slBufPct / 100.0)    // SL just above the ORB high boundary
     sv
 
-// ── TRADE EXECUTION ─────────────────────────────────────────────────────────
-var int   nyT = 0
-var int   asT = 0
-var float sR  = 0.0
-var int   cCt = 0
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 22 — TRADE EXECUTION
+// Four execution blocks: ORB long, ORB short, sweep long, sweep short
+// Each block calculates its own local TP levels (rr1–rr4) to avoid CE10088
+// Trade counters (nyT, asT) track entries per session for the dashboard
+// ══════════════════════════════════════════════════════════════════════════════
+var int   nyT = 0    // Counter: number of entries taken during NY AM sessions
+var int   asT = 0    // Counter: number of entries taken during Asia sessions
+var float sR  = 0.0  // Accumulator: sum of R-multiples on closed trades (for avg R calculation)
+var int   cCt = 0    // Counter: number of closed trades processed (prevents double-counting)
 
-// ORB long entry
-if orbLongSig and not sweepLong
-    ePx  := close
-    spPx := getOrbStop(1)
-    float rr1 = math.abs(ePx - spPx)
-    t1   := ePx + rr1 * tp1R
-    t2   := ePx + rr1 * tp2R
-    t3   := ePx + rr1 * tp3R
-    strategy.entry("ORB-L", strategy.long, comment="ORB-L " + grade)
-    strategy.exit("ORB-LX", "ORB-L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
-    if inNY
+// --- ORB Long Entry ---
+if orbLongSig and not sweepLong              // Execute ORB long only if sweep long is NOT also firing (prevent duplicate entries)
+    ePx  := close                            // Record entry price as current close
+    spPx := getOrbStop(1)                    // Calculate stop-loss at ORB low boundary
+    float rr1 = math.abs(ePx - spPx)        // R = distance from entry to stop (risk per share)
+    t1   := ePx + rr1 * tp1R                // TP1 = entry + 1R (or custom multiplier)
+    t2   := ePx + rr1 * tp2R                // TP2 = entry + 2R
+    t3   := ePx + rr1 * tp3R                // TP3 = entry + 3R (strategy exit limit)
+    strategy.entry("ORB-L", strategy.long, comment="ORB-L " + grade)                               // Submit long market order labeled with grade
+    strategy.exit("ORB-LX", "ORB-L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3") // Set stop and TP3 on exit; partial exits not supported natively
+    if inNY                                  // Count this trade in the NY session tracker
         nyT += 1
 
-// ORB short entry
-if orbShortSig and not sweepShort
-    ePx  := close
-    spPx := getOrbStop(-1)
-    float rr2 = math.abs(ePx - spPx)
-    t1   := ePx - rr2 * tp1R
-    t2   := ePx - rr2 * tp2R
-    t3   := ePx - rr2 * tp3R
+// --- ORB Short Entry ---
+if orbShortSig and not sweepShort            // Execute ORB short only if sweep short is NOT also firing
+    ePx  := close                            // Record entry price
+    spPx := getOrbStop(-1)                   // Calculate stop-loss at ORB high boundary
+    float rr2 = math.abs(ePx - spPx)        // R = entry-to-stop distance
+    t1   := ePx - rr2 * tp1R                // TP1 below entry
+    t2   := ePx - rr2 * tp2R                // TP2 below entry
+    t3   := ePx - rr2 * tp3R                // TP3 below entry (strategy exit limit)
     strategy.entry("ORB-S", strategy.short, comment="ORB-S " + grade)
     strategy.exit("ORB-SX", "ORB-S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
         nyT += 1
 
-// Sweep/structure long entry
+// --- Sweep/Structure Long Entry ---
 if sweepLong
-    ePx  := close
-    spPx := getSweepStop(1)
-    float rr3 = math.abs(ePx - spPx)
-    t1   := ePx + rr3 * tp1R
-    t2   := ePx + rr3 * tp2R
-    t3   := ePx + rr3 * tp3R
+    ePx  := close                            // Record entry price
+    spPx := getSweepStop(1)                  // Calculate stop-loss below sweep wick/current low
+    float rr3 = math.abs(ePx - spPx)        // R = entry-to-stop distance
+    t1   := ePx + rr3 * tp1R                // TP1 above entry
+    t2   := ePx + rr3 * tp2R                // TP2 above entry
+    t3   := ePx + rr3 * tp3R                // TP3 above entry
     strategy.entry("L", strategy.long, comment="L " + grade)
     strategy.exit("LX", "L", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
-        nyT += 1
+        nyT += 1    // Count NY session entry
     if inAS
-        asT += 1
+        asT += 1    // Count Asia session entry
 
-// Sweep/structure short entry
+// --- Sweep/Structure Short Entry ---
 if sweepShort
-    ePx  := close
-    spPx := getSweepStop(-1)
-    float rr4 = math.abs(ePx - spPx)
-    t1   := ePx - rr4 * tp1R
-    t2   := ePx - rr4 * tp2R
-    t3   := ePx - rr4 * tp3R
+    ePx  := close                            // Record entry price
+    spPx := getSweepStop(-1)                 // Calculate stop-loss above sweep wick/current high
+    float rr4 = math.abs(ePx - spPx)        // R = entry-to-stop distance
+    t1   := ePx - rr4 * tp1R                // TP1 below entry
+    t2   := ePx - rr4 * tp2R                // TP2 below entry
+    t3   := ePx - rr4 * tp3R                // TP3 below entry
     strategy.entry("S", strategy.short, comment="S " + grade)
     strategy.exit("SX", "S", stop=spPx, limit=t3, comment_loss="SL", comment_profit="TP3")
     if inNY
@@ -393,99 +528,119 @@ if sweepShort
     if inAS
         asT += 1
 
-if strategy.closedtrades > cCt
-    float rsk = math.abs(ePx - spPx)
-    if rsk > 0
-        float pl = strategy.closedtrades.profit(strategy.closedtrades - 1)
-        float sz = strategy.closedtrades.size(strategy.closedtrades - 1)
-        sR += pl / (rsk * sz)
-    cCt := strategy.closedtrades
+// Track R-multiple on each newly closed trade for average R calculation
+if strategy.closedtrades > cCt                                            // If a new trade just closed since last bar...
+    float rsk = math.abs(ePx - spPx)                                     // Retrieve the risk (entry-to-stop distance) for that trade
+    if rsk > 0                                                            // Avoid division by zero if risk is undefined
+        float pl = strategy.closedtrades.profit(strategy.closedtrades - 1)  // P&L of the last closed trade in dollars
+        float sz = strategy.closedtrades.size(strategy.closedtrades - 1)    // Position size of the last closed trade
+        sR += pl / (rsk * sz)                                            // R-multiple = profit / (risk per unit × size)
+    cCt := strategy.closedtrades                                         // Update closed trade count to prevent re-processing
 
-// ── VISUALS ─────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 23 — VISUALS
+// Draw a signal label and 4 horizontal lines (SL + TP1 + TP2 + TP3) per entry
+// All colors come from the color input variables in Section 8
+// ══════════════════════════════════════════════════════════════════════════════
 if longSig or shortSig
-    isL     = longSig
-    isORB   = (orbLongSig and isL) or (orbShortSig and not isL)
-    lbStyle = isL ? label.style_label_up : label.style_label_down
-    lbColor = isL ? cBull : cBear
-    lbY     = isL ? low   : high
-    pfx     = isORB ? "ORB " : ""
-    lbTxt   = (isL ? "▲ " : "▼ ") + pfx + (isL ? "BUY " : "SELL ") + grade + " (" + str.tostring(score) + ")"
-    label.new(bar_index, lbY, lbTxt, style=lbStyle, color=lbColor, textcolor=color.white, size=size.normal)
-    // SL line — red, thick
-    line.new(bar_index, spPx, bar_index + 20, spPx, color=cBear, width=2, style=line.style_dotted)
-    // TP1 — faint green
-    line.new(bar_index, t1, bar_index + 20, t1, color=color.new(cBull, 55), width=1, style=line.style_dotted)
-    // TP2 — medium green
-    line.new(bar_index, t2, bar_index + 20, t2, color=color.new(cBull, 25), width=1, style=line.style_dotted)
-    // TP3 — solid green, thick
-    line.new(bar_index, t3, bar_index + 20, t3, color=cBull, width=2, style=line.style_solid)
+    isL     = longSig                                                             // true if this is a long signal
+    isORB   = (orbLongSig and isL) or (orbShortSig and not isL)                  // true if this signal came from the ORB path
+    lbStyle = isL ? label.style_label_up : label.style_label_down                // Arrow points up for longs, down for shorts
+    lbColor = isL ? cBuyLabel : cSellLabel                                        // Use customizable buy/sell label colors from inputs
+    lbY     = isL ? low   : high                                                  // Place label at bar low for longs, bar high for shorts
+    pfx     = isORB ? "ORB " : ""                                                 // Prepend "ORB " to label text for ORB-path signals
+    lbTxt   = (isL ? "▲ " : "▼ ") + pfx + (isL ? "BUY " : "SELL ") + grade + " (" + str.tostring(score) + ")"  // Full label text e.g. "▲ BUY A (75)"
+    label.new(bar_index, lbY, lbTxt, style=lbStyle, color=lbColor, textcolor=color.white, size=size.normal)      // Draw the entry label
+    line.new(bar_index, spPx, bar_index + 20, spPx, color=cSLLine,  width=2, style=line.style_dotted)            // Stop-loss line — customizable color, extends 20 bars right
+    line.new(bar_index, t1,   bar_index + 20, t1,   color=cTP1Line, width=1, style=line.style_dotted)            // TP1 line — faint by default
+    line.new(bar_index, t2,   bar_index + 20, t2,   color=cTP2Line, width=1, style=line.style_dotted)            // TP2 line — medium opacity by default
+    line.new(bar_index, t3,   bar_index + 20, t3,   color=cTP3Line, width=2, style=line.style_solid)             // TP3 line — solid, thicker
 
-// ── ALERTS ──────────────────────────────────────────────────────────────────
-alertcondition(longSig  and score >= 70, "Long A+/A/B",    "SLS LONG")
-alertcondition(shortSig and score >= 70, "Short A+/A/B",   "SLS SHORT")
-alertcondition(orbLongSig,               "ORB Long",        "SLS ORB LONG")
-alertcondition(orbShortSig,              "ORB Short",       "SLS ORB SHORT")
-alertcondition(longSig,  "Long Any",  "SLS LONG")
-alertcondition(shortSig, "Short Any", "SLS SHORT")
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 24 — ALERTS
+// Six static alert conditions for TradingView alert manager
+// Plus one dynamic alert() that fires a detailed message on every signal bar
+// ══════════════════════════════════════════════════════════════════════════════
+alertcondition(longSig  and score >= 70, "Long A+/A/B",    "SLS LONG")    // Alert: long signal with B grade or better (score ≥ 70)
+alertcondition(shortSig and score >= 70, "Short A+/A/B",   "SLS SHORT")   // Alert: short signal with B grade or better
+alertcondition(orbLongSig,               "ORB Long",        "SLS ORB LONG")   // Alert: any ORB long breakout
+alertcondition(orbShortSig,              "ORB Short",       "SLS ORB SHORT")  // Alert: any ORB short breakout
+alertcondition(longSig,  "Long Any",  "SLS LONG")     // Alert: any long signal regardless of grade
+alertcondition(shortSig, "Short Any", "SLS SHORT")    // Alert: any short signal regardless of grade
+
 if longSig or shortSig
-    string aD = longSig ? "BUY " : "SELL "
-    string aM = aD + grade + " score=" + str.tostring(score) + " @ " + str.tostring(close)
-    alert(aM, alert.freq_once_per_bar_close)
+    string aD = longSig ? "BUY " : "SELL "                                             // Direction word for alert message
+    string aM = aD + grade + " score=" + str.tostring(score) + " @ " + str.tostring(close)  // Build alert message: e.g. "BUY A+ score=92 @ 18432.5"
+    alert(aM, alert.freq_once_per_bar_close)                                            // Fire dynamic alert once per bar close (prevents duplicate alerts mid-bar)
 
-// ── DASHBOARD STRINGS + COLORS ──────────────────────────────────────────────
-float wR  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0
-float gP  = strategy.grossprofit
-float gL2 = strategy.grossloss
-float pf  = gL2 > 0 ? gP / gL2 : 0.0
-float mDD = strategy.max_drawdown
-float aR  = cCt > 0 ? sR / cCt : 0.0
-bool aPlus = (longSig or shortSig) and score >= 90
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 25 — DASHBOARD DATA PREPARATION
+// Pre-compute all strings and colors used in the dashboard table
+// ══════════════════════════════════════════════════════════════════════════════
+float wR  = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0  // Win rate as a percentage
+float gP  = strategy.grossprofit                    // Total gross profit across all closed trades
+float gL2 = strategy.grossloss                      // Total gross loss across all closed trades
+float pf  = gL2 > 0 ? gP / gL2 : 0.0              // Profit factor = gross profit ÷ gross loss (>1.5 is good)
+float mDD = strategy.max_drawdown                   // Maximum drawdown in account currency
+float aR  = cCt > 0 ? sR / cCt : 0.0              // Average R-multiple per closed trade
+bool aPlus = (longSig or shortSig) and score >= 90  // true if an A+ grade setup is active this bar
 
-string d01 = htfTxt
-string d02 = sessName
-string d03 = tDir == 1 ? "LONG" : "SHORT"
-string d04 = grade + " (" + str.tostring(score) + ")"
-string d05 = str.tostring(score) + "%"
-string d06 = str.tostring(vDelta, "#.0")
-string d07 = str.tostring(rvol, "#.00") + "x"
-string d08 = orbTxt
-string d09 = vwBull ? "ABOVE" : "BELOW"
-string d10 = strTxt
-string d11 = not swept ? "NONE" : swL ? "BSL TAKEN" : "SSL TAKEN"
-string d12 = "1 : " + str.tostring(tp3R, "#.0")
-string d13 = str.tostring(wR, "#.0") + "% / " + str.tostring(pf, "#.00")
-string d14 = str.tostring(mDD, "#") + " / " + str.tostring(aR, "#.00") + "R"
-string d15 = str.tostring(nyT) + " / " + str.tostring(asT) + " (T:" + str.tostring(strategy.closedtrades) + ")"
+// Dashboard value strings (one per row)
+string d01 = htfTxt                                                                          // Row 1: HTF Bias text (BULLISH / BEARISH / NEUTRAL)
+string d02 = sessName                                                                        // Row 2: Current session name
+string d03 = tDir == 1 ? "LONG" : "SHORT"                                                   // Row 3: Trade direction (based on score comparison)
+string d04 = grade + " (" + str.tostring(score) + ")"                                       // Row 4: Grade letter + numeric score
+string d05 = str.tostring(score) + "%"                                                       // Row 5: Score as a percentage string
+string d06 = str.tostring(vDelta, "#.0")                                                     // Row 6: Volume delta (positive = net buying)
+string d07 = str.tostring(rvol, "#.00") + "x"                                                // Row 7: Relative volume (e.g. "1.85x")
+string d08 = orbTxt                                                                          // Row 8: ORB status (FORMING / SET / BROKEN UP / BROKEN DOWN / N/A)
+string d09 = vwBull ? "ABOVE" : "BELOW"                                                     // Row 9: Price position relative to VWAP
+string d10 = strTxt                                                                          // Row 10: Market structure label (e.g. "BULLISH (HH)")
+string d11 = not swept ? "NONE" : swL ? "BSL TAKEN" : "SSL TAKEN"                          // Row 11: Most recent liquidity sweep status
+string d12 = "1 : " + str.tostring(tp3R, "#.0")                                             // Row 12: Risk-to-reward ratio at TP3 (e.g. "1 : 3.0")
+string d13 = str.tostring(wR, "#.0") + "% / " + str.tostring(pf, "#.00")                    // Row 13: Win rate % + profit factor
+string d14 = str.tostring(mDD, "#") + " / " + str.tostring(aR, "#.00") + "R"               // Row 14: Max drawdown + average R-multiple
+string d15 = str.tostring(nyT) + " / " + str.tostring(asT) + " (T:" + str.tostring(strategy.closedtrades) + ")"  // Row 15: NY entries / Asia entries / total closed trades
 
-color c01 = htfBias == 1 ? cBull : htfBias == -1 ? cBear : cNeut
-color c02 = inWin ? cBull : cNeut
-color c03 = tDir == 1 ? cBull : cBear
-color c04 = score >= 80 ? cBull : score >= 60 ? cORB : cNeut
-color c05 = score >= 70 ? cBull : cNeut
-color c06 = vDelta > 0 ? cBull : cBear
-color c07 = rvol >= rvolMin ? cBull : cNeut
-color c09 = vwBull ? cBull : cBear
-color c10 = trD == 1 ? cBull : trD == -1 ? cBear : cNeut
-color c11 = swept ? cORB : cNeut
+// Dashboard value colors (semantic coloring — green = good, red = bad, gray = neutral)
+color c01 = htfBias == 1 ? cBull : htfBias == -1 ? cBear : cNeut   // HTF Bias: green/red/gray
+color c02 = inWin ? cBull : cNeut                                    // Session: green if in active window
+color c03 = tDir == 1 ? cBull : cBear                               // Direction: green for long, red for short
+color c04 = score >= 80 ? cBull : score >= 60 ? cORB : cNeut        // Grade: green if A/A+, orange if C+, gray otherwise
+color c05 = score >= 70 ? cBull : cNeut                             // Score %: green if B or better
+color c06 = vDelta > 0 ? cBull : cBear                              // Volume delta: green if net buying
+color c07 = rvol >= rvolMin ? cBull : cNeut                         // RVOL: green if above minimum threshold
+color c09 = vwBull ? cBull : cBear                                  // VWAP position: green if above
+color c10 = trD == 1 ? cBull : trD == -1 ? cBear : cNeut           // Market structure: green/red/gray
+color c11 = swept ? cORB : cNeut                                    // Sweep: orange if a sweep occurred, gray if none
 
-if showDash and barstate.islast
-    table.cell(dash, 0, 0, "SMART LIQUIDITY & STRUCTURE", text_color=color.white, bgcolor=color.new(#2962ff, 0), text_size=size.normal)
-    table.cell(dash, 1, 0, aPlus ? "A+ ACTIVE" : "NO A+ SETUP", text_color=color.white, text_size=size.normal, bgcolor=aPlus ? cBull : color.new(#444444, 0))
-    dashRow(dash,  1, "HTF Bias",        d01, c01)
-    dashRow(dash,  2, "Session",          d02, c02)
-    dashRow(dash,  3, "Trade Direction",  d03, c03)
-    dashRow(dash,  4, "Trade Grade",      d04, c04)
-    dashRow(dash,  5, "Probability",      d05, c05)
-    dashRow(dash,  6, "Volume Delta",     d06, c06)
-    dashRow(dash,  7, "Relative Volume",  d07, c07)
-    dashRow(dash,  8, "ORB Status",       d08, cORB)
-    dashRow(dash,  9, "VWAP Status",      d09, c09)
-    dashRow(dash, 10, "Market Structure", d10, c10)
-    dashRow(dash, 11, "Liquidity Sweep",  d11, c11)
-    dashRow(dash, 12, "Risk : Reward",    d12, cBull)
-    dashRow(dash, 13, "Win Rate / PF",    d13, cNeut)
-    dashRow(dash, 14, "MaxDD / Avg R",    d14, cNeut)
-    dashRow(dash, 15, "Trades NY / Asia", d15, cNeut)
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 26 — DASHBOARD RENDER
+// Fills the table with all rows using the strings and colors prepared above
+// Only runs on the last bar to avoid performance overhead
+// ══════════════════════════════════════════════════════════════════════════════
+if showDash and barstate.islast                                                                                       // Only draw on the final bar (avoids redrawing every bar)
+    table.cell(dash, 0, 0, "SMART LIQUIDITY & STRUCTURE", text_color=color.white, bgcolor=cDashHdr, text_size=size.normal)                      // Header: strategy name with customizable background
+    table.cell(dash, 1, 0, aPlus ? "A+ ACTIVE" : "NO A+ SETUP", text_color=color.white, text_size=size.normal, bgcolor=aPlus ? cDashAPlus : cDashNoSet)  // Header right: A+ alert cell
+    dashRow(dash,  1, "HTF Bias",        d01, c01)   // Row 1: Higher timeframe trend bias
+    dashRow(dash,  2, "Session",          d02, c02)  // Row 2: Which session is active right now
+    dashRow(dash,  3, "Trade Direction",  d03, c03)  // Row 3: Whether score favors long or short
+    dashRow(dash,  4, "Trade Grade",      d04, c04)  // Row 4: A+ / A / B / C grade with score
+    dashRow(dash,  5, "Probability",      d05, c05)  // Row 5: Score as a rough probability estimate
+    dashRow(dash,  6, "Volume Delta",     d06, c06)  // Row 6: Net buying/selling volume this bar
+    dashRow(dash,  7, "Relative Volume",  d07, c07)  // Row 7: Volume relative to its average
+    dashRow(dash,  8, "ORB Status",       d08, cORB) // Row 8: Opening range status
+    dashRow(dash,  9, "VWAP Status",      d09, c09)  // Row 9: Price above or below session VWAP
+    dashRow(dash, 10, "Market Structure", d10, c10)  // Row 10: Bullish / Bearish / Ranging + swing type
+    dashRow(dash, 11, "Liquidity Sweep",  d11, c11)  // Row 11: Recent sweep status (BSL/SSL/None)
+    dashRow(dash, 12, "Risk : Reward",    d12, cBull) // Row 12: R:R ratio using TP3 as target
+    dashRow(dash, 13, "Win Rate / PF",    d13, cNeut) // Row 13: Backtest win rate and profit factor
+    dashRow(dash, 14, "MaxDD / Avg R",    d14, cNeut) // Row 14: Max drawdown and average R-multiple
+    dashRow(dash, 15, "Trades NY / Asia", d15, cNeut) // Row 15: Trade count breakdown by session
 
-// ── SESSION BACKGROUND ───────────────────────────────────────────────────────
-bgcolor(inWin ? color.new(inNY ? #2962ff : #ff9800, 93) : na, title="Session BG")
+// ══════════════════════════════════════════════════════════════════════════════
+// SECTION 27 — SESSION BACKGROUND
+// Tints the chart background with a faint color during active trading windows
+// Colors are fully customizable via the color inputs in Section 8
+// ══════════════════════════════════════════════════════════════════════════════
+bgcolor(inWin ? (inNY ? cNYBG : cASBG) : na, title="Session BG")   // NY = blue tint, Asia = orange tint (customizable), off-session = no tint
