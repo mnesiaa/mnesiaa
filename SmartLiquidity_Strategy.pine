@@ -1,11 +1,9 @@
 //@version=6
 // ============================================================================
 //  SMART LIQUIDITY & STRUCTURE STRATEGY (SLS)
-//  Production-ready ICT-style algo: HTF Bias + Liquidity Sweeps + MSS/CHOCH
-//  + Order Flow + ORB + Entry Rating Engine + Risk Mgmt + Dashboard
-//
-//  Works as BOTH a strategy (backtesting) and an overlay indicator.
-//  Non-repainting: all signals confirm on bar close.
+//  HTF Bias + Liquidity Sweeps + MSS/CHOCH + Order Flow + ORB
+//  Entry Rating Engine + Risk Mgmt + Dashboard
+//  Non-repainting — all signals confirm on bar close.
 // ============================================================================
 strategy("Smart Liquidity & Structure Strategy",
      shorttitle        = "SLS",
@@ -25,45 +23,44 @@ strategy("Smart Liquidity & Structure Strategy",
 // ============================================================================
 //  INPUTS
 // ============================================================================
-grpSess = "Session Filtering (Exchange = EST)"
-useNYam = input.bool(true,  "Trade NY AM (09:30-11:30)", group=grpSess)
-useAsia = input.bool(true,  "Trade Asia (19:00-00:00)",  group=grpSess)
-tzInput = input.string("America/New_York", "Session Timezone", group=grpSess)
+grpSess = "Session Filtering"
+useNYam = input.bool(true,  "Trade NY AM (09:30-11:30 EST)", group=grpSess)
+useAsia = input.bool(true,  "Trade Asia (19:00-00:00 EST)",  group=grpSess)
+tzInput = input.string("America/New_York", "Timezone", group=grpSess)
 
-grpHTF = "Higher-Timeframe Bias Engine"
-htf1   = input.timeframe("D",   "HTF #1 (Daily)", group=grpHTF)
-htf2   = input.timeframe("240", "HTF #2 (4H)",    group=grpHTF)
-htf3   = input.timeframe("60",  "HTF #3 (1H)",    group=grpHTF)
+grpHTF = "HTF Bias Engine"
+htf1   = input.timeframe("D",   "Daily TF",  group=grpHTF)
+htf2   = input.timeframe("240", "4H TF",     group=grpHTF)
+htf3   = input.timeframe("60",  "1H TF",     group=grpHTF)
 
 grpStruct = "Market Structure"
-pivotLen  = input.int(5, "Pivot Lookback (bars)", minval=2, group=grpStruct)
+pivotLen  = input.int(5, "Pivot Lookback", minval=2, group=grpStruct)
 
-grpLiq    = "Liquidity Model"
-eqTol     = input.float(0.05, "Equal H/L Tolerance (%)", minval=0.0, step=0.01, group=grpLiq)
-liqLookbk = input.int(20, "Liquidity Lookback (bars)", minval=5, group=grpLiq)
+grpLiq    = "Liquidity"
+liqLookbk = input.int(20, "Lookback Bars", minval=5, group=grpLiq)
+slBuf     = input.float(0.05, "SL Buffer %", minval=0.0, step=0.01, group=grpLiq)
 
-grpFlow  = "Order Flow Confirmation"
-rvolLen  = input.int(20,   "Relative Volume Length", minval=2, group=grpFlow)
-rvolMin  = input.float(1.3,"Min Relative Volume", minval=1.0, step=0.1, group=grpFlow)
-dispMult = input.float(1.5,"Displacement ATR Mult", minval=1.0, step=0.1, group=grpFlow)
+grpFlow  = "Order Flow"
+rvolLen  = input.int(20,   "RVOL Length",   minval=2,  group=grpFlow)
+rvolMin  = input.float(1.3,"Min RVOL",      minval=1.0, step=0.1, group=grpFlow)
+dispMult = input.float(1.5,"Displacement Mult", minval=1.0, step=0.1, group=grpFlow)
 
-grpFVG = "Fair Value Gaps"
-useFVG = input.bool(true, "Require/Score FVG", group=grpFVG)
+grpFVG   = "Fair Value Gaps"
+useFVG   = input.bool(true, "Score FVG", group=grpFVG)
 
-grpScore = "Entry Rating System"
-minGrade = input.int(60, "Min Score to Trade (C=60)", minval=0, maxval=100, group=grpScore)
+grpScore = "Grading"
+minScore = input.int(60, "Min Score (C=60, B=70, A=80, A+=90)", minval=0, maxval=100, group=grpScore)
 
-grpRisk     = "Risk Management"
-slBufferPct = input.float(0.05, "SL Buffer beyond sweep (%)", minval=0.0, step=0.01, group=grpRisk)
-tp1R        = input.float(1.0, "TP1 (R)", step=0.5, group=grpRisk)
-tp2R        = input.float(2.0, "TP2 (R)", step=0.5, group=grpRisk)
-tp3R        = input.float(3.0, "TP3 (R)", step=0.5, group=grpRisk)
+grpRisk = "Risk Management"
+tp1R    = input.float(1.0, "TP1 R", step=0.5, group=grpRisk)
+tp2R    = input.float(2.0, "TP2 R", step=0.5, group=grpRisk)
+tp3R    = input.float(3.0, "TP3 R", step=0.5, group=grpRisk)
 
-grpUI    = "Visuals"
-showDash = input.bool(true, "Show Dashboard",       group=grpUI)
-showVWAP = input.bool(true, "Show VWAP",            group=grpUI)
-showORB  = input.bool(true, "Show ORB levels",      group=grpUI)
-showLiq  = input.bool(true, "Show Liquidity zones", group=grpUI)
+grpUI    = "Display"
+showDash = input.bool(true, "Dashboard",     group=grpUI)
+showVWAP = input.bool(true, "VWAP",          group=grpUI)
+showORB  = input.bool(true, "ORB Lines",     group=grpUI)
+showLiq  = input.bool(true, "Sweep Labels",  group=grpUI)
 
 // ============================================================================
 //  COLORS
@@ -73,44 +70,65 @@ cBear = color.new(#ef5350, 0)
 cNeut = color.new(color.gray, 0)
 cVWAP = color.new(#2962ff, 0)
 cORB  = color.new(#ff9800, 0)
-cLiq  = color.new(#9c27b0, 75)
 
 // ============================================================================
-//  SESSION DETECTION (timezone-aware, no repaint)
+//  DASHBOARD HELPER  (must be defined before use)
+// ============================================================================
+var table dash = table.new(position.top_right, 2, 17,
+     border_width=1, frame_color=color.gray, frame_width=1)
+
+dashRow(t, i, k, v, vc) =>
+    table.cell(t, 0, i, k,
+         text_color  = color.white,
+         text_size   = size.small,
+         bgcolor     = color.new(#1e1e2e, 0),
+         text_halign = text.align_left)
+    table.cell(t, 1, i, v,
+         text_color  = vc,
+         text_size   = size.small,
+         bgcolor     = color.new(#2a2a3a, 0),
+         text_halign = text.align_right)
+
+// ============================================================================
+//  SESSION DETECTION
 // ============================================================================
 inNYam      = not na(time(timeframe.period, "0930-1130", tzInput))
 inAsia      = not na(time(timeframe.period, "1900-0000", tzInput))
 tradeWindow = (useNYam and inNYam) or (useAsia and inAsia)
-sessName    = inNYam ? "NY AM" : inAsia ? "ASIA" : "OFF-SESSION"
+
+sessName = "OFF-SESSION"
+if inNYam
+    sessName := "NY AM"
+else if inAsia
+    sessName := "ASIA"
 
 newNYsession  = inNYam and not inNYam[1]
 newAnySession = (inNYam and not inNYam[1]) or (inAsia and not inAsia[1])
 
 // ============================================================================
-//  VWAP (session-anchored)
+//  SESSION-ANCHORED VWAP
 // ============================================================================
 var float vwapNum = na
 var float vwapDen = na
 if newAnySession
     vwapNum := 0.0
     vwapDen := 0.0
-tpv     = hlc3 * volume
-vwapNum := nz(vwapNum) + tpv
-vwapDen := nz(vwapDen) + volume
-vwap     = vwapDen > 0 ? vwapNum / vwapDen : close
-vwapBull = close > vwap
-plot(showVWAP ? vwap : na, "VWAP", color=cVWAP, linewidth=2)
+vwapNum  := nz(vwapNum) + hlc3 * volume
+vwapDen  := nz(vwapDen) + volume
+vwapVal  = vwapDen > 0 ? vwapNum / vwapDen : close
+vwapBull = close > vwapVal
+plot(showVWAP ? vwapVal : na, "VWAP", color=cVWAP, linewidth=2)
 
 // ============================================================================
-//  HIGHER-TIMEFRAME BIAS ENGINE
+//  HTF BIAS ENGINE  (Daily / 4H / 1H)
 // ============================================================================
 htfBiasCalc(tf) =>
-    [c, h, l, ph, pl] = request.security(syminfo.tickerid, tf,
-         [close, high, low, high[1], low[1]], lookahead=barmerge.lookahead_off)
+    [htfC, htfPH, htfPL] = request.security(syminfo.tickerid, tf,
+         [close, high[1], low[1]], lookahead=barmerge.lookahead_off)
     int b = 0
-    if c > ph
+    if htfC > htfPH
         b := 1
-    else if c < pl
+    else if htfC < htfPL
         b := -1
     b
 
@@ -119,152 +137,170 @@ bias4H   = htfBiasCalc(htf2)
 bias1H   = htfBiasCalc(htf3)
 htfScore = biasD + bias4H + bias1H
 htfBias  = htfScore > 0 ? 1 : htfScore < 0 ? -1 : 0
-htfBiasTxt = htfBias == 1 ? "BULLISH" : htfBias == -1 ? "BEARISH" : "NEUTRAL"
+
+htfBiasTxt = "NEUTRAL"
+if htfBias == 1
+    htfBiasTxt := "BULLISH"
+else if htfBias == -1
+    htfBiasTxt := "BEARISH"
 
 // ============================================================================
-//  MARKET STRUCTURE ENGINE — HH/HL/LH/LL, MSS, CHOCH
+//  MARKET STRUCTURE  (HH / HL / LH / LL / MSS / CHOCH)
 // ============================================================================
-ph = ta.pivothigh(high, pivotLen, pivotLen)
-pl = ta.pivotlow(low,   pivotLen, pivotLen)
+phVal = ta.pivothigh(high, pivotLen, pivotLen)
+plVal = ta.pivotlow(low,   pivotLen, pivotLen)
 
 var float  lastPH        = na
 var float  prevPH        = na
 var float  lastPL        = na
 var float  prevPL        = na
 var int    trendDir      = 0
-var string lastSwingType = ""
+var string lastSwing     = "N/A"
 
-if not na(ph)
-    prevPH        := lastPH
-    lastPH        := ph
-    lastSwingType := (not na(prevPH) and ph > prevPH) ? "HH" : "LH"
-if not na(pl)
-    prevPL        := lastPL
-    lastPL        := pl
-    lastSwingType := (not na(prevPL) and pl > prevPL) ? "HL" : "LL"
+if not na(phVal)
+    prevPH    := lastPH
+    lastPH    := phVal
+    lastSwing := (not na(prevPH) and phVal > prevPH) ? "HH" : "LH"
+if not na(plVal)
+    prevPL    := lastPL
+    lastPL    := plVal
+    lastSwing := (not na(prevPL) and plVal > prevPL) ? "HL" : "LL"
 
 bosUp   = not na(lastPH) and close > lastPH and close[1] <= lastPH
 bosDown = not na(lastPL) and close < lastPL and close[1] >= lastPL
-
-choch = (trendDir <= 0 and bosUp) or (trendDir >= 0 and bosDown)
-mss   = bosUp or bosDown
+choch   = (trendDir <= 0 and bosUp) or (trendDir >= 0 and bosDown)
+mss     = bosUp or bosDown
 
 if bosUp
     trendDir := 1
 if bosDown
     trendDir := -1
 
-structTxt = trendDir == 1  ? "BULLISH (" + lastSwingType + ")" :
-            trendDir == -1 ? "BEARISH (" + lastSwingType + ")" : "RANGING"
+structTxt = "RANGING"
+if trendDir == 1
+    structTxt := "BULLISH (" + lastSwing + ")"
+else if trendDir == -1
+    structTxt := "BEARISH (" + lastSwing + ")"
 
 // ============================================================================
-//  LIQUIDITY MODEL — buy/sell side liquidity + sweep detection
+//  LIQUIDITY MODEL  (sweep detection, non-repainting on close)
 // ============================================================================
-prevDayHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
-prevDayLow  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
-
-var float sessHigh = na
-var float sessLow  = na
-if newAnySession
-    sessHigh := high
-    sessLow  := low
-else
-    sessHigh := math.max(nz(sessHigh, high), high)
-    sessLow  := math.min(nz(sessLow,  low),  low)
+pdHigh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdLow  = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
 
 hh = ta.highest(high, liqLookbk)
 ll = ta.lowest(low,   liqLookbk)
 
-sweepHigh = high > math.max(nz(prevDayHigh, hh), hh) and close < math.max(nz(prevDayHigh, hh), hh)
-sweepLow  = low  < math.min(nz(prevDayLow,  ll), ll) and close > math.min(nz(prevDayLow,  ll), ll)
+liqResHigh = math.max(nz(pdHigh, hh), hh)
+liqResLow  = math.min(nz(pdLow,  ll), ll)
+
+sweepHigh = high > liqResHigh and close < liqResHigh
+sweepLow  = low  < liqResLow  and close > liqResLow
 liqSwept  = sweepHigh or sweepLow
-sweepDir  = sweepLow ? 1 : sweepHigh ? -1 : 0
 
-sweepExtremeHigh = sweepHigh ? high : na
-sweepExtremeLow  = sweepLow  ? low  : na
+sweepExH  = sweepHigh ? high : na
+sweepExL  = sweepLow  ? low  : na
 
-if showLiq
-    if sweepHigh
-        label.new(bar_index, high, "SSL swept",
-             style=label.style_label_down,
-             color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
-    if sweepLow
-        label.new(bar_index, low, "BSL swept",
-             style=label.style_label_up,
-             color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
+if showLiq and sweepHigh
+    label.new(bar_index, high, "SSL swept",
+         style=label.style_label_down,
+         color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
+if showLiq and sweepLow
+    label.new(bar_index, low, "BSL swept",
+         style=label.style_label_up,
+         color=color.new(#9c27b0, 30), textcolor=color.white, size=size.tiny)
 
 // ============================================================================
-//  ORDER FLOW CONFIRMATION — volume delta, relative volume, displacement
+//  ORDER FLOW  (delta proxy / RVOL / displacement)
 // ============================================================================
-rng     = high - low
-buyVol  = rng > 0 ? volume * (close - low) / rng : volume * 0.5
-sellVol = rng > 0 ? volume * (high - close) / rng : volume * 0.5
+rng      = high - low
+buyVol   = rng > 0 ? volume * (close - low)  / rng : volume * 0.5
+sellVol  = rng > 0 ? volume * (high - close) / rng : volume * 0.5
 volDelta = buyVol - sellVol
 
 rvol     = volume / math.max(ta.sma(volume, rvolLen), 1e-9)
-atr      = ta.atr(14)
+atr14    = ta.atr(14)
 bodySize = math.abs(close - open)
+isDisp   = bodySize > atr14 * dispMult and rvol >= rvolMin
+dispBull = isDisp and close > open
+dispBear = isDisp and close < open
 
-displacement = bodySize > atr * dispMult and rvol >= rvolMin
-dispBull     = displacement and close > open
-dispBear     = displacement and close < open
-
-ofBull = volDelta > 0 and rvol >= rvolMin and dispBull
-ofBear = volDelta < 0 and rvol >= rvolMin and dispBear
+ofBull   = volDelta > 0 and rvol >= rvolMin and dispBull
+ofBear   = volDelta < 0 and rvol >= rvolMin and dispBear
 
 // ============================================================================
-//  FAIR VALUE GAP (3-candle imbalance)
+//  FAIR VALUE GAP
 // ============================================================================
 fvgBull = useFVG and low  > high[2]
 fvgBear = useFVG and high < low[2]
 
 // ============================================================================
-//  OPENING RANGE BREAKOUT — first 15 min of NY AM
+//  OPENING RANGE BREAKOUT  (first 15 min of NY AM)
 // ============================================================================
-inORBwindow = not na(time(timeframe.period, "0930-0945", tzInput))
-var float orbHigh = na
-var float orbLow  = na
-var bool  orbSet  = false
+inORBwin = not na(time(timeframe.period, "0930-0945", tzInput))
+
+var float orbH   = na
+var float orbL   = na
+var bool  orbSet = false
 
 if newNYsession
-    orbHigh := high
-    orbLow  := low
-    orbSet  := false
-else if inORBwindow
-    orbHigh := math.max(nz(orbHigh, high), high)
-    orbLow  := math.min(nz(orbLow,  low),  low)
-else if inNYam and not inORBwindow
+    orbH   := high
+    orbL   := low
+    orbSet := false
+else if inORBwin
+    orbH := math.max(nz(orbH, high), high)
+    orbL := math.min(nz(orbL, low),  low)
+else if inNYam and not inORBwin
     orbSet := true
 
-orbBreakUp   = orbSet and not na(orbHigh) and close > orbHigh and close[1] <= orbHigh
-orbBreakDown = orbSet and not na(orbLow)  and close < orbLow  and close[1] >= orbLow
-orbStatus    = not orbSet and inNYam ? "FORMING" :
-               orbBreakUp            ? "BROKEN UP" :
-               orbBreakDown          ? "BROKEN DOWN" :
-               orbSet                ? "SET" : "N/A"
+orbBreakUp   = orbSet and not na(orbH) and close > orbH and close[1] <= orbH
+orbBreakDown = orbSet and not na(orbL) and close < orbL  and close[1] >= orbL
+
+orbStatus = "N/A"
+if not orbSet and inNYam
+    orbStatus := "FORMING"
+else if orbBreakUp
+    orbStatus := "BROKEN UP"
+else if orbBreakDown
+    orbStatus := "BROKEN DOWN"
+else if orbSet
+    orbStatus := "SET"
 
 if showORB and orbSet
-    line.new(bar_index - 1, orbHigh, bar_index, orbHigh, color=cORB, style=line.style_dashed)
-    line.new(bar_index - 1, orbLow,  bar_index, orbLow,  color=cORB, style=line.style_dashed)
+    line.new(bar_index - 1, orbH, bar_index, orbH, color=cORB, style=line.style_dashed)
+    line.new(bar_index - 1, orbL, bar_index, orbL,  color=cORB, style=line.style_dashed)
 
 // ============================================================================
-//  ENTRY RATING SYSTEM — scoring engine
+//  ENTRY SCORING ENGINE
+//  HTF Bias=25, Sweep=20, Order Flow=20, MSS/CHOCH=15, FVG=10, VWAP=10
 // ============================================================================
-scoreLong  = 0
-scoreLong += htfBias == 1                           ? 25 : 0
-scoreLong += sweepLow                               ? 20 : 0
-scoreLong += ofBull                                 ? 20 : 0
-scoreLong += (mss or choch) and trendDir == 1       ? 15 : 0
-scoreLong += fvgBull                                ? 10 : 0
-scoreLong += vwapBull                               ? 10 : 0
+scoreLong = 0
+if htfBias == 1
+    scoreLong += 25
+if sweepLow
+    scoreLong += 20
+if ofBull
+    scoreLong += 20
+if (mss or choch) and trendDir == 1
+    scoreLong += 15
+if fvgBull
+    scoreLong += 10
+if vwapBull
+    scoreLong += 10
 
-scoreShort  = 0
-scoreShort += htfBias == -1                         ? 25 : 0
-scoreShort += sweepHigh                             ? 20 : 0
-scoreShort += ofBear                                ? 20 : 0
-scoreShort += (mss or choch) and trendDir == -1     ? 15 : 0
-scoreShort += fvgBear                               ? 10 : 0
-scoreShort += not vwapBull                          ? 10 : 0
+scoreShort = 0
+if htfBias == -1
+    scoreShort += 25
+if sweepHigh
+    scoreShort += 20
+if ofBear
+    scoreShort += 20
+if (mss or choch) and trendDir == -1
+    scoreShort += 15
+if fvgBear
+    scoreShort += 10
+if not vwapBull
+    scoreShort += 10
 
 tradeDir = scoreLong >= scoreShort ? 1 : -1
 score    = math.max(scoreLong, scoreShort)
@@ -274,37 +310,34 @@ gradeOf(s) =>
 grade = gradeOf(score)
 
 // ============================================================================
-//  SIGNAL GATING (non-repainting; confirms on bar close)
+//  SIGNAL GATING
 // ============================================================================
-baseLong  = tradeWindow and tradeDir == 1  and liqSwept and (mss or choch) and ofBull
-baseShort = tradeWindow and tradeDir == -1 and liqSwept and (mss or choch) and ofBear
-
-longSig  = baseLong  and score >= minGrade and strategy.position_size <= 0
-shortSig = baseShort and score >= minGrade and strategy.position_size >= 0
+longSig  = (tradeWindow and tradeDir == 1  and liqSwept and
+            (mss or choch) and ofBull and score >= minScore and
+            strategy.position_size <= 0)
+shortSig = (tradeWindow and tradeDir == -1 and liqSwept and
+            (mss or choch) and ofBear and score >= minScore and
+            strategy.position_size >= 0)
 
 // ============================================================================
-//  RISK MANAGEMENT
+//  RISK LEVELS  (SL at sweep extreme, TP at 1R/2R/3R)
 // ============================================================================
 var float entryPx = na
 var float stopPx  = na
-var float tp1     = na
-var float tp2     = na
-var float tp3     = na
-var int   posDir  = 0
+var float tp1px   = na
+var float tp2px   = na
+var float tp3px   = na
 
-calcLevels(dir) =>
-    float e  = close
-    float s  = dir == 1 ?
-         math.min(nz(sweepExtremeLow,  low),  low)  * (1.0 - slBufferPct / 100.0) :
-         math.max(nz(sweepExtremeHigh, high), high)  * (1.0 + slBufferPct / 100.0)
-    float rv = math.abs(e - s)
-    float t1 = dir == 1 ? e + rv * tp1R : e - rv * tp1R
-    float t2 = dir == 1 ? e + rv * tp2R : e - rv * tp2R
-    float t3 = dir == 1 ? e + rv * tp3R : e - rv * tp3R
-    [e, s, t1, t2, t3, rv]
+calcStop(dir) =>
+    float s = na
+    if dir == 1
+        s := math.min(nz(sweepExL, low), low) * (1.0 - slBuf / 100.0)
+    else
+        s := math.max(nz(sweepExH, high), high) * (1.0 + slBuf / 100.0)
+    s
 
 // ============================================================================
-//  BACKTEST STATS TRACKING
+//  TRADE EXECUTION + STAT TRACKING
 // ============================================================================
 var int   nyTrades   = 0
 var int   asiaTrades = 0
@@ -312,136 +345,114 @@ var float sumR       = 0.0
 var int   closedCt   = 0
 
 if longSig
-    [e, s, t1, t2, t3, rv] = calcLevels(1)
-    entryPx := e
-    stopPx  := s
-    tp1     := t1
-    tp2     := t2
-    tp3     := t3
-    posDir  := 1
-    strategy.entry("L", strategy.long, comment="L " + grade)
-    strategy.exit("L-TP", "L", stop=s, limit=t3,
-         comment_loss="SL", comment_profit="TP3")
+    entryPx := close
+    stopPx  := calcStop(1)
+    float rr = math.abs(entryPx - stopPx)
+    tp1px   := entryPx + rr * tp1R
+    tp2px   := entryPx + rr * tp2R
+    tp3px   := entryPx + rr * tp3R
+    strategy.entry("L", strategy.long,  comment="L " + grade)
+    strategy.exit("LX", "L", stop=stopPx, limit=tp3px, comment_loss="SL", comment_profit="TP3")
     if inNYam
         nyTrades += 1
     if inAsia
         asiaTrades += 1
 
 if shortSig
-    [e, s, t1, t2, t3, rv] = calcLevels(-1)
-    entryPx := e
-    stopPx  := s
-    tp1     := t1
-    tp2     := t2
-    tp3     := t3
-    posDir  := -1
+    entryPx := close
+    stopPx  := calcStop(-1)
+    float rr = math.abs(entryPx - stopPx)
+    tp1px   := entryPx - rr * tp1R
+    tp2px   := entryPx - rr * tp2R
+    tp3px   := entryPx - rr * tp3R
     strategy.entry("S", strategy.short, comment="S " + grade)
-    strategy.exit("S-TP", "S", stop=s, limit=t3,
-         comment_loss="SL", comment_profit="TP3")
+    strategy.exit("SX", "S", stop=stopPx, limit=tp3px, comment_loss="SL", comment_profit="TP3")
     if inNYam
         nyTrades += 1
     if inAsia
         asiaTrades += 1
 
 if strategy.closedtrades > closedCt
-    risk = math.abs(entryPx - stopPx)
+    float risk = math.abs(entryPx - stopPx)
     if risk > 0
-        lastPnl = strategy.closedtrades.profit(strategy.closedtrades - 1)
-        sumR   += lastPnl / (risk * strategy.closedtrades.size(strategy.closedtrades - 1))
+        float pnl  = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        float sz   = strategy.closedtrades.size(strategy.closedtrades - 1)
+        sumR += pnl / (risk * sz)
     closedCt := strategy.closedtrades
 
 // ============================================================================
-//  VISUALS — entry labels + SL/TP lines
+//  VISUALS  (labels + SL/TP lines)
 // ============================================================================
 if longSig or shortSig
-    isLong = longSig
-    label.new(bar_index, isLong ? low : high,
-         (isLong ? "BUY " : "SELL ") + grade + "  (" + str.tostring(score) + ")",
-         style    = isLong ? label.style_label_up : label.style_label_down,
-         color    = isLong ? cBull : cBear,
-         textcolor = color.white,
-         size     = size.normal)
-    line.new(bar_index, stopPx, bar_index + 10, stopPx,
-         color=cBear, width=1, style=line.style_dotted)
-    line.new(bar_index, tp1, bar_index + 10, tp1,
-         color=cBull, width=1, style=line.style_dotted)
-    line.new(bar_index, tp2, bar_index + 10, tp2,
-         color=cBull, width=1, style=line.style_dotted)
-    line.new(bar_index, tp3, bar_index + 10, tp3,
-         color=cBull, width=1, style=line.style_dotted)
+    isLong    = longSig
+    lblStyle  = isLong ? label.style_label_up : label.style_label_down
+    lblColor  = isLong ? cBull : cBear
+    lblY      = isLong ? low   : high
+    lblText   = (isLong ? "BUY " : "SELL ") + grade + " (" + str.tostring(score) + ")"
+    label.new(bar_index, lblY, lblText,
+         style=lblStyle, color=lblColor, textcolor=color.white, size=size.normal)
+    line.new(bar_index, stopPx, bar_index + 10, stopPx, color=cBear, width=1, style=line.style_dotted)
+    line.new(bar_index, tp1px,  bar_index + 10, tp1px,  color=cBull, width=1, style=line.style_dotted)
+    line.new(bar_index, tp2px,  bar_index + 10, tp2px,  color=cBull, width=1, style=line.style_dotted)
+    line.new(bar_index, tp3px,  bar_index + 10, tp3px,  color=cBull, width=1, style=line.style_dotted)
 
 // ============================================================================
-//  ALERTS — A+/A/B only
+//  ALERTS
 // ============================================================================
 alertcondition(longSig  and score >= 70, "Long A+/A/B",  "SLS LONG signal")
 alertcondition(shortSig and score >= 70, "Short A+/A/B", "SLS SHORT signal")
 if (longSig or shortSig) and score >= 70
-    alert((longSig ? "BUY " : "SELL ") + grade +
-         " score=" + str.tostring(score) + " @ " + str.tostring(close),
+    string alertDir = longSig ? "BUY " : "SELL "
+    alert(alertDir + grade + " score=" + str.tostring(score) + " @ " + str.tostring(close),
          alert.freq_once_per_bar_close)
 
 // ============================================================================
-//  DASHBOARD — helper function defined at top level (required by Pine v6)
+//  DASHBOARD
 // ============================================================================
-var table dash = table.new(position.top_right, 2, 16,
-     border_width=1, frame_color=color.gray, frame_width=1)
+float winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100.0 : 0.0
+float gProfit = strategy.grossprofit
+float gLoss   = strategy.grossloss
+float pf      = gLoss > 0 ? gProfit / gLoss : 0.0
+float maxDD   = strategy.max_drawdown
+float avgR    = closedCt > 0 ? sumR / closedCt : 0.0
+bool  hasAp   = (longSig or shortSig) and score >= 90
 
-dashRow(t, i, k, v, vc) =>
-    table.cell(t, 0, i, k,
-         text_color=color.white, text_size=size.small,
-         bgcolor=color.new(#1e1e2e, 0), text_halign=text.align_left)
-    table.cell(t, 1, i, v,
-         text_color=vc, text_size=size.small,
-         bgcolor=color.new(#2a2a3a, 0), text_halign=text.align_right)
-
-winRate     = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
-grossProfit = strategy.grossprofit
-grossLoss   = strategy.grossloss
-pf          = grossLoss > 0 ? grossProfit / grossLoss : 0.0
-maxDD       = strategy.max_drawdown
-avgR        = closedCt > 0 ? sumR / closedCt : 0.0
-hasAplus    = (longSig or shortSig) and score >= 90
+// Pre-build strings to keep dashRow calls single-line
+string rrTxt    = "1 : " + str.tostring(tp3R, "#.0")
+string wPfTxt   = str.tostring(winRate, "#.0") + "% / " + str.tostring(pf, "#.00")
+string ddRTxt   = str.tostring(maxDD,   "#")   + " / "  + str.tostring(avgR, "#.00") + "R"
+string sessTx2  = str.tostring(nyTrades) + " / " + str.tostring(asiaTrades) + " (T:" + str.tostring(strategy.closedtrades) + ")"
+string volDTxt  = str.tostring(volDelta, "#.0")
+string rvolTxt  = str.tostring(rvol, "#.00") + "x"
+string scoreTxt = grade + " (" + str.tostring(score) + ")"
+string probTxt  = str.tostring(score) + "%"
+string dirTxt   = tradeDir == 1 ? "LONG" : "SHORT"
+string swpTxt   = not liqSwept ? "NONE" : sweepLow ? "BSL TAKEN" : "SSL TAKEN"
+string vwapTxt  = vwapBull ? "ABOVE" : "BELOW"
 
 if showDash and barstate.islast
     table.cell(dash, 0, 0, "SMART LIQUIDITY & STRUCTURE",
          text_color=color.white, bgcolor=color.new(#2962ff, 0), text_size=size.normal)
-    table.cell(dash, 1, 0, hasAplus ? "A+ ACTIVE" : "NO A+ SETUP",
-         text_color=color.white,
-         bgcolor=hasAplus ? cBull : color.new(#444444, 0),
-         text_size=size.normal)
-
-    dashRow(dash, 1,  "HTF Bias",         htfBiasTxt,
-         htfBias == 1 ? cBull : htfBias == -1 ? cBear : cNeut)
-    dashRow(dash, 2,  "Session",           sessName,
-         tradeWindow ? cBull : cNeut)
-    dashRow(dash, 3,  "Trade Direction",   tradeDir == 1 ? "LONG" : "SHORT",
-         tradeDir == 1 ? cBull : cBear)
-    dashRow(dash, 4,  "Trade Grade",       grade + " (" + str.tostring(score) + ")",
-         score >= 80 ? cBull : score >= 60 ? cORB : cNeut)
-    dashRow(dash, 5,  "Probability",       str.tostring(score) + "%",
-         score >= 70 ? cBull : cNeut)
-    dashRow(dash, 6,  "Volume Delta",      str.tostring(volDelta, "#.0"),
-         volDelta > 0 ? cBull : cBear)
-    dashRow(dash, 7,  "Relative Volume",   str.tostring(rvol, "#.00") + "x",
-         rvol >= rvolMin ? cBull : cNeut)
-    dashRow(dash, 8,  "ORB Status",        orbStatus,          cORB)
-    dashRow(dash, 9,  "VWAP Status",       vwapBull ? "ABOVE" : "BELOW",
-         vwapBull ? cBull : cBear)
-    dashRow(dash, 10, "Market Structure",  structTxt,
-         trendDir == 1 ? cBull : trendDir == -1 ? cBear : cNeut)
-    dashRow(dash, 11, "Liquidity Sweep",
-         liqSwept ? (sweepLow ? "BSL TAKEN" : "SSL TAKEN") : "NONE",
-         liqSwept ? cORB : cNeut)
-    dashRow(dash, 12, "Risk : Reward",     "1 : " + str.tostring(tp3R, "#.0"), cBull)
-    dashRow(dash, 13, "Win Rate / PF",
-         str.tostring(winRate, "#.0") + "% / " + str.tostring(pf, "#.00"), cNeut)
-    dashRow(dash, 14, "MaxDD / Avg R",
-         str.tostring(maxDD, "#") + " / " + str.tostring(avgR, "#.00") + "R", cNeut)
-    dashRow(dash, 15, "Trades NY / Asia",
-         str.tostring(nyTrades) + " / " + str.tostring(asiaTrades) +
-         "  (T:" + str.tostring(strategy.closedtrades) + ")", cNeut)
+    table.cell(dash, 1, 0, hasAp ? "A+ ACTIVE" : "NO A+ SETUP",
+         text_color=color.white, text_size=size.normal,
+         bgcolor=hasAp ? cBull : color.new(#444444, 0))
+    dashRow(dash,  1, "HTF Bias",         htfBiasTxt,  htfBias == 1 ? cBull : htfBias == -1 ? cBear : cNeut)
+    dashRow(dash,  2, "Session",           sessName,    tradeWindow ? cBull : cNeut)
+    dashRow(dash,  3, "Trade Direction",   dirTxt,      tradeDir == 1 ? cBull : cBear)
+    dashRow(dash,  4, "Trade Grade",       scoreTxt,    score >= 80 ? cBull : score >= 60 ? cORB : cNeut)
+    dashRow(dash,  5, "Probability",       probTxt,     score >= 70 ? cBull : cNeut)
+    dashRow(dash,  6, "Volume Delta",      volDTxt,     volDelta > 0 ? cBull : cBear)
+    dashRow(dash,  7, "Relative Volume",   rvolTxt,     rvol >= rvolMin ? cBull : cNeut)
+    dashRow(dash,  8, "ORB Status",        orbStatus,   cORB)
+    dashRow(dash,  9, "VWAP Status",       vwapTxt,     vwapBull ? cBull : cBear)
+    dashRow(dash, 10, "Market Structure",  structTxt,   trendDir == 1 ? cBull : trendDir == -1 ? cBear : cNeut)
+    dashRow(dash, 11, "Liquidity Sweep",   swpTxt,      liqSwept ? cORB : cNeut)
+    dashRow(dash, 12, "Risk : Reward",     rrTxt,       cBull)
+    dashRow(dash, 13, "Win Rate / PF",     wPfTxt,      cNeut)
+    dashRow(dash, 14, "MaxDD / Avg R",     ddRTxt,      cNeut)
+    dashRow(dash, 15, "Trades NY / Asia",  sessTx2,     cNeut)
 
 // ============================================================================
-//  BACKGROUND TINT FOR ACTIVE SESSION
+//  SESSION BACKGROUND TINT
 // ============================================================================
 bgcolor(tradeWindow ? color.new(inNYam ? #2962ff : #ff9800, 93) : na, title="Session BG")
