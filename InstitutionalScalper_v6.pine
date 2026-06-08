@@ -1,136 +1,533 @@
-//@version=6
-strategy(
-     title             = "Institutional Scalper Pro v1.3",
-     shorttitle        = "ISP v1.3",
-     overlay           = true,
-     pyramiding        = 0,
-     default_qty_type  = strategy.percent_of_equity,
-     default_qty_value = 10,
-     initial_capital   = 100000,
-     commission_type   = strategy.commission.percent,
-     commission_value  = 0.02,
-     slippage          = 2,
-     calc_on_every_tick      = false,
-     process_orders_on_close = true)
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// at https://mozilla.org/MPL/2.0/
+// © Leviathan / Institutional Edge + Volume Profile
 
-// ===========================================================
-// HELPER FUNCTIONS  (global scope required by Pine Script)
-// ===========================================================
+//@version=6
+indicator(
+     title            = "Institutional Edge + Volume Profile",
+     shorttitle       = "IE+VP",
+     overlay          = true,
+     max_boxes_count  = 500,
+     max_bars_back    = 1000,
+     max_lines_count  = 500,
+     max_labels_count = 300)
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
 
 fmtP(float v) =>
     str.tostring(math.round(v, 2))
 
 fmtOk(bool b) =>
-    b ? "[Y]" : "[N]"
+    b ? "[✓]" : "[ ]"
 
-drawLevel(int x0, float price, int ext, color lineCol, color bgCol, color txtCol, string txt) =>
-    line.new(x0, price, ext, price, color = lineCol, style = line.style_dashed, width = 1)
-    label.new(ext, price, txt,
-         color     = bgCol,
-         textcolor = txtCol,
-         style     = label.style_label_left,
-         size      = size.small,
-         xloc      = xloc.bar_index)
+getGrade(int score) =>
+    score >= 90 ? "A+" :
+     score >= 80 ? "A"  :
+     score >= 70 ? "B+" :
+     score >= 60 ? "B"  :
+     score >= 50 ? "C+" : "X"
 
-// ===========================================================
-// INPUTS
-// ===========================================================
+// ============================================================
+// INPUTS — VOLUME PROFILE
+// ============================================================
 
-i_useSession = input.bool(true,   "Enable NY AM Session Filter",    group = "Session")
-i_showSessBG = input.bool(true,   "Shade Session Background",       group = "Session")
-i_sesStart   = input.int(930,     "Session Start HHMM EST",         group = "Session")
-i_sesEnd     = input.int(1130,    "Session End HHMM EST",           group = "Session")
+grpVP        = "Volume Profile"
+i_sessType   = input.string("Daily", "Session Type",
+     options = ["Tokyo","London","New York","Daily","Weekly","Monthly","Quarterly","Yearly"],
+     group = grpVP)
+i_showProf   = input.bool(true,  "Show Volume Profile",  group = grpVP)
+i_showPoc    = input.bool(true,  "Show POC",             group = grpVP)
+i_showVA     = input.bool(true,  "Show VAH / VAL",        group = grpVP)
+i_showVAb    = input.bool(false, "Show Value Area Box",  group = grpVP)
+i_showCur    = input.bool(true,  "Show Live Zone",       group = grpVP)
+i_showVPLab  = input.bool(true,  "Show Session Labels",  group = grpVP)
+i_showFx     = input.bool(false, "Show Forex Sessions",  group = grpVP)
+i_resolution = input.int(30,  "Resolution", minval = 5,  group = grpVP)
+i_vaWidth    = input.int(70,  "Value Area %", minval = 1, maxval = 100, group = grpVP)
+i_dispMode   = input.string("Mode 2", "Bar Mode",
+     options = ["Mode 1","Mode 2","Mode 3"], group = grpVP)
+i_volType    = input.string("Volume", "Data Type",
+     options = ["Volume","Open Interest"], group = grpVP)
+i_smoothVol  = input.bool(false, "Smooth Volume", group = grpVP)
 
-i_nearLen    = input.int(15,  "Near Structure Lookback",  minval = 5,  maxval = 60,  group = "Structure")
-i_farLen     = input.int(40,  "Far Structure Lookback",   minval = 10, maxval = 200, group = "Structure")
-i_sweepWin   = input.int(3,   "Sweep Entry Window bars",  minval = 1,  maxval = 8,   group = "Structure")
+// ============================================================
+// INPUTS — APPEARANCE
+// ============================================================
 
-i_fvgOn      = input.bool(true,  "Enable FVG",             group = "Fair Value Gap")
-i_fvgMinATR  = input.float(0.2,  "Min FVG Size ATR mult",  minval = 0.05, step = 0.05, group = "Fair Value Gap")
-i_fvgWin     = input.int(4,      "FVG Valid Window bars",  minval = 1, maxval = 10,    group = "Fair Value Gap")
+grpApp    = "Appearance"
+i_bullCol = input.color(color.rgb(76,175,79,50),   "Up Volume",      group = grpApp)
+i_bearCol = input.color(color.rgb(255,82,82,50),   "Down Volume",    group = grpApp)
+i_VAbCol  = input.color(color.rgb(107,159,255,90), "Value Area Box", group = grpApp)
+i_pocCol  = input.color(color.red,  "POC",    inline = "p", group = grpApp)
+i_pocWid  = input.int(1, "Width",             inline = "p", group = grpApp)
+i_vahCol  = input.color(color.aqua, "VAH",    inline = "h", group = grpApp)
+i_vahWid  = input.int(1, "Width",             inline = "h", group = grpApp)
+i_valCol  = input.color(color.aqua, "VAL",    inline = "l", group = grpApp)
+i_valWid  = input.int(1, "Width",             inline = "l", group = grpApp)
+i_boxBg   = input.color(color.rgb(255,153,0,100), "Box", inline = "m", group = grpApp)
+i_boxWid  = input.int(1, "Width",             inline = "m", group = grpApp)
 
-i_volLen     = input.int(20,    "Rel-Vol Lookback",        minval = 5,   group = "Volume")
-i_volThresh  = input.float(1.2, "Vol Spike Threshold",     minval = 1.0, step = 0.1, group = "Volume")
+// ============================================================
+// INPUTS — HTF BIAS
+// ============================================================
 
-i_emaFast    = input.int(9,    "EMA Fast",            minval = 3,  group = "Indicators")
-i_emaMid     = input.int(20,   "EMA Mid",             minval = 5,  group = "Indicators")
-i_emaSlow    = input.int(50,   "EMA Slow display",    minval = 20, group = "Indicators")
-i_rsiLen     = input.int(9,    "RSI Length",          minval = 2,  group = "Indicators")
-i_rsiBullMin = input.int(45,   "RSI Min for Longs",   minval = 30, maxval = 65, group = "Indicators")
-i_rsiBearMax = input.int(55,   "RSI Max for Shorts",  minval = 35, maxval = 70, group = "Indicators")
-i_atrLen     = input.int(14,   "ATR Length",          minval = 2,  group = "Indicators")
-i_atrMult    = input.float(0.5,"ATR Stop Buffer mult",minval = 0.1, step = 0.1, group = "Indicators")
-i_displLen   = input.int(3,    "Displacement Window", minval = 1,  maxval = 6,  group = "Indicators")
+grpHTF       = "HTF Bias"
+i_showHTF    = input.bool(true, "Show HTF Bias",             group = grpHTF)
+i_htfFast    = input.int(20, "Fast EMA Length", minval = 5,  group = grpHTF)
+i_htfSlow    = input.int(50, "Slow EMA Length", minval = 10, group = grpHTF)
 
-i_tp1R   = input.float(1.0,  "TP1 R",          minval = 0.5, step = 0.25, group = "Take Profit")
-i_tp2R   = input.float(2.0,  "TP2 R",          minval = 1.0, step = 0.25, group = "Take Profit")
-i_tp3R   = input.float(3.0,  "TP3 R",          minval = 1.5, step = 0.25, group = "Take Profit")
-i_runR   = input.float(5.0,  "Runner R",       minval = 2.0, step = 0.5,  group = "Take Profit")
-i_tp1pct = input.float(40.0, "Pct exit at TP1",minval = 10, maxval = 80, step = 5, group = "Take Profit")
-i_tp2pct = input.float(30.0, "Pct exit at TP2",minval = 10, maxval = 60, step = 5, group = "Take Profit")
-i_tp3pct = input.float(20.0, "Pct exit at TP3",minval = 5,  maxval = 40, step = 5, group = "Take Profit")
+// ============================================================
+// INPUTS — VWAP
+// ============================================================
 
-i_showEMAs  = input.bool(true,  "Show EMAs",             group = "Visual")
-i_showVWAP  = input.bool(true,  "Show VWAP",             group = "Visual")
-i_showFVG   = input.bool(true,  "Show FVG Zones",        group = "Visual")
-i_showStr   = input.bool(true,  "Show Structure Levels", group = "Visual")
-i_showSesHL = input.bool(true,  "Show Session HL",       group = "Visual")
-i_showBOS   = input.bool(true,  "Show BOS CHoCH Labels", group = "Visual")
-i_showSLTP  = input.bool(true,  "Show SL TP Lines",      group = "Visual")
-i_showDash  = input.bool(true,  "Show Dashboard",        group = "Visual")
-i_showDebug = input.bool(false, "Show Condition Debug",  group = "Visual")
+grpVWAP      = "VWAP"
+i_showVWAP   = input.bool(true,  "Show Session VWAP",        group = grpVWAP)
+i_showWkVWAP = input.bool(true,  "Show Weekly VWAP",         group = grpVWAP)
+i_vwapCol    = input.color(color.orange, "VWAP Color",        group = grpVWAP)
+i_wkVwapCol  = input.color(color.purple, "Weekly VWAP Color", group = grpVWAP)
 
-// ===========================================================
-// BASE INDICATORS
-// ===========================================================
+// ============================================================
+// INPUTS — MARKET STRUCTURE
+// ============================================================
 
-atr  = ta.atr(i_atrLen)
-emaF = ta.ema(close, i_emaFast)
-emaM = ta.ema(close, i_emaMid)
-emaS = ta.ema(close, i_emaSlow)
-rsi  = ta.rsi(close, i_rsiLen)
+grpMS        = "Market Structure"
+i_showStr    = input.bool(true, "Show EMAs + Pivots",         group = grpMS)
+i_pivLen     = input.int(5,  "Pivot Length", minval = 2, maxval = 20, group = grpMS)
+i_showBOS    = input.bool(true, "Show BOS / CHoCH",           group = grpMS)
+i_nearLen    = input.int(15, "Near Structure Lookback",       group = grpMS)
+i_farLen     = input.int(40, "Far Structure Lookback",        group = grpMS)
 
-// Session-anchored VWAP (resets on each new daily/session open)
-vwap_val = ta.vwap(hlc3)
+// ============================================================
+// INPUTS — FVG
+// ============================================================
 
-avgVol   = ta.sma(volume, i_volLen)
-relVol   = volume / avgVol
-volSpike = relVol >= i_volThresh
+grpFVG       = "Fair Value Gap"
+i_showFVG    = input.bool(true,  "Show FVG",                  group = grpFVG)
+i_fvgMinATR  = input.float(0.2,  "Min FVG Size (ATR ×)",      minval = 0.05, step = 0.05, group = grpFVG)
+i_fvgWin     = input.int(4, "FVG Valid Window (bars)",        minval = 1, group = grpFVG)
 
-// ===========================================================
-// SESSION FILTER  (integer HHMM comparison, works on all markets)
-// ===========================================================
+// ============================================================
+// INPUTS — LIQUIDITY
+// ============================================================
 
-barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
-inSession = not i_useSession or (barHHMM >= i_sesStart and barHHMM < i_sesEnd)
+grpLiq       = "Liquidity"
+i_showLiq    = input.bool(true,  "Show Equal Levels",         group = grpLiq)
+i_liqTol     = input.float(0.1,  "Equal Level Tolerance %",   minval = 0.01, maxval = 2.0, step = 0.01, group = grpLiq)
+i_sweepWin   = input.int(3, "Sweep Valid Window (bars)",      minval = 1, maxval = 10, group = grpLiq)
+i_showSweeps = input.bool(true,  "Show Sweep Markers",        group = grpLiq)
 
-var float sessionHigh = na
-var float sessionLow  = na
-var bool  prevSess    = false
+// ============================================================
+// INPUTS — ORB
+// ============================================================
 
-sessOpened = inSession and not prevSess
-prevSess  := inSession
+grpORB        = "Opening Range"
+i_showORB     = input.bool(true,  "Show ORB Boxes",           group = grpORB,
+     tooltip = "Best results on intraday timeframes ≤ 30 min")
+i_orbMins     = input.int(30, "ORB Duration (minutes)",       minval = 5, maxval = 240, group = grpORB)
+i_showNYORB   = input.bool(true,  "New York (9:30 EST)",      group = grpORB)
+i_showLonORB  = input.bool(true,  "London (8:00 UTC)",        group = grpORB)
+i_showAsiaORB = input.bool(true,  "Asia (0:00 UTC)",          group = grpORB)
 
-if sessOpened
-    sessionHigh := high
-    sessionLow  := low
-else if inSession
-    sessionHigh := math.max(sessionHigh, high)
-    sessionLow  := math.min(sessionLow,  low)
+// ============================================================
+// INPUTS — STRATEGY SIGNALS
+// ============================================================
 
-// ===========================================================
-// ZERO-LAG ROLLING STRUCTURE
-// [1] offset = based on already-closed bars = non-repainting
-// Signal fires the same bar price crosses — no pivot wait
-// Near = recent sweep targets   Far = BOS / macro trend
-// ===========================================================
+grpSig      = "Strategy Signals"
+i_showSig   = input.bool(true,  "Show Trade Signals",         group = grpSig)
+i_minScore  = input.int(60, "Minimum Score (0–100)",          minval = 0, maxval = 100, group = grpSig)
+i_showSLTP  = input.bool(true,  "Show SL / TP Lines",         group = grpSig)
+i_tp1R      = input.float(1.0,  "TP1 R", minval = 0.5, step = 0.25, group = grpSig)
+i_tp2R      = input.float(2.0,  "TP2 R", minval = 1.0, step = 0.25, group = grpSig)
+i_tp3R      = input.float(3.0,  "TP3 R", minval = 1.5, step = 0.25, group = grpSig)
+i_maxSig    = input.int(2, "Max Signals Per Session",         minval = 1, maxval = 5, group = grpSig)
+i_atrLen    = input.int(14, "ATR Length", minval = 2,         group = grpSig)
+i_atrMult   = input.float(0.5, "ATR SL Buffer ×",            minval = 0.1, step = 0.1, group = grpSig)
 
-nearHigh = ta.highest(high, i_nearLen)[1]
-nearLow  = ta.lowest (low,  i_nearLen)[1]
-farHigh  = ta.highest(high, i_farLen) [1]
-farLow   = ta.lowest (low,  i_farLen) [1]
+// ============================================================
+// INPUTS — DASHBOARD
+// ============================================================
 
-// BOS / CHoCH
+grpDash     = "Dashboard"
+i_showDash  = input.bool(true,  "Show Dashboard",             group = grpDash)
+i_dashPos   = input.string("Top Right", "Position",
+     options = ["Top Right","Top Left","Bottom Right","Bottom Left"], group = grpDash)
+i_showDebug = input.bool(false, "Show Debug Table",           group = grpDash)
+
+// ============================================================
+// VOLUME PROFILE CORE  (logic fully preserved from original)
+// ============================================================
+
+var int   vpZoneStart    = 0
+var int   vpTokyoStart   = 0
+var int   vpLondonStart  = 0
+var int   vpNYStart      = 0
+int       vpLookback     = bar_index - vpZoneStart
+var bool  vpActiveZone   = false
+
+var float[] vpGreen      = array.new_float(i_resolution, 0.0)
+var float[] vpRed        = array.new_float(i_resolution, 0.0)
+var float[] vpZoneBounds = array.new_float(i_resolution, 0.0)
+
+var float[] ltfO  = array.new_float(0)
+var float[] ltfC  = array.new_float(0)
+var float[] ltfH  = array.new_float(0)
+var float[] ltfL  = array.new_float(0)
+var float[] ltfV  = array.new_float(0)
+
+string _oiTicker = str.format("{0}_OI", syminfo.prefix + ":" + syminfo.ticker)
+float  deltaOi   = request.security(_oiTicker, timeframe.period,
+     close - close[1], ignore_invalid_symbol = true)
+
+vpVol() =>
+    float out = i_smoothVol ? ta.ema(volume, 5) : volume
+    if i_volType == "Open Interest"
+        out := deltaOi
+    out
+
+[dO, dC, dH, dL, dV] = request.security_lower_tf(syminfo.tickerid, "",
+     [open, close, high, low, vpVol()])
+
+float vpProfHigh = ta.highest(high, math.max(vpLookback + 1, 1))[1]
+float vpProfLow  = ta.lowest(low,   math.max(vpLookback + 1, 1))[1]
+
+vpGetVol(float y11, float y12, float y21, float y22, float ht, float v) =>
+    ht <= 0.0 ? 0.0 : nz(math.max(
+         math.min(math.max(y11,y12), math.max(y21,y22)) -
+         math.max(math.min(y11,y12), math.min(y21,y22)), 0.0) * v / ht)
+
+vpReset(bool en) =>
+    if en
+        array.fill(vpGreen, 0.0)
+        array.fill(vpRed,   0.0)
+        array.clear(ltfO)
+        array.clear(ltfH)
+        array.clear(ltfL)
+        array.clear(ltfC)
+        array.clear(ltfV)
+
+vpProfileAdd(float o, float h, float l, float c, float v, float g) =>
+    for i = 0 to array.size(vpGreen) - 1
+        float zt = array.get(vpZoneBounds, i)
+        float zb = zt - g
+        float bt = math.max(c, o)
+        float bb = math.min(c, o)
+        bool  ig = c >= o
+        float tw = math.max(h - bt, 0.0)
+        float bw = math.max(bb - l, 0.0)
+        float bd = math.max(bt - bb, 0.0)
+        float dn = 2.0 * tw + 2.0 * bw + bd
+        if dn <= 0.0
+            continue
+        float bvol = bd * v / dn
+        float tvol = 2.0 * tw * v / dn
+        float wvol = 2.0 * bw * v / dn
+        if i_volType == "Volume"
+            array.set(vpGreen, i, array.get(vpGreen, i) +
+                 (ig ? vpGetVol(zb, zt, bb, bt, bd, bvol) : 0.0) +
+                 vpGetVol(zb, zt, bt, h, tw, tvol) / 2.0 +
+                 vpGetVol(zb, zt, bb, l, bw, wvol) / 2.0)
+            array.set(vpRed, i, array.get(vpRed, i) +
+                 (ig ? 0.0 : vpGetVol(zb, zt, bb, bt, bd, bvol)) +
+                 vpGetVol(zb, zt, bt, h, tw, tvol) / 2.0 +
+                 vpGetVol(zb, zt, bb, l, bw, wvol) / 2.0)
+        else if i_volType == "Open Interest"
+            if v > 0.0
+                array.set(vpGreen, i, array.get(vpGreen, i) + vpGetVol(zb, zt, bb, bt, bd, v))
+            if v < 0.0
+                array.set(vpRed, i, array.get(vpRed, i)     + vpGetVol(zb, zt, bb, bt, bd, -v))
+
+vpCalcSession(bool update) =>
+    array.fill(vpGreen, 0.0)
+    array.fill(vpRed,   0.0)
+    if bar_index > vpLookback and update
+        float g = (vpProfHigh - vpProfLow) / i_resolution
+        for i = 0 to i_resolution - 1
+            array.set(vpZoneBounds, i, vpProfHigh - g * i)
+        if array.size(ltfO) > 0
+            for j = 0 to array.size(ltfO) - 1
+                vpProfileAdd(array.get(ltfO, j), array.get(ltfH, j), array.get(ltfL, j),
+                     array.get(ltfC, j), array.get(ltfV, j), g)
+
+vpPocLevel() =>
+    float mx  = 0.0
+    int   idx = 0
+    for i = 0 to array.size(vpRed) - 1
+        float tot = array.get(vpRed, i) + array.get(vpGreen, i)
+        if tot > mx
+            mx  := tot
+            idx := i
+    float out = na
+    if idx != array.size(vpRed) - 1
+        out := array.get(vpZoneBounds, idx) -
+             (array.get(vpZoneBounds, idx) - array.get(vpZoneBounds, idx + 1)) / 2.0
+    out
+
+vpValueLevels(float poc) =>
+    float g   = (vpProfHigh - vpProfLow) / i_resolution
+    float vs  = array.sum(vpRed) + array.sum(vpGreen)
+    float vc  = 0.0
+    float vah = vpProfHigh
+    float val = vpProfLow
+    int   pi  = 0
+    for i = 0 to array.size(vpZoneBounds) - 2
+        if array.get(vpZoneBounds, i) >= poc and array.get(vpZoneBounds, i + 1) < poc
+            pi := i
+    vc += (array.get(vpRed, pi) + array.get(vpGreen, pi))
+    for i = 1 to array.size(vpRed)
+        if pi + i < array.size(vpRed)
+            vc += (array.get(vpRed, pi + i) + array.get(vpGreen, pi + i))
+            if vc >= vs * (i_vaWidth / 100.0)
+                break
+            else
+                val := array.get(vpZoneBounds, pi + i) - g
+        if pi - i >= 0
+            vc += (array.get(vpRed, pi - i) + array.get(vpGreen, pi - i))
+            if vc >= vs * (i_vaWidth / 100.0)
+                break
+            else
+                vah := array.get(vpZoneBounds, pi - i)
+    [val, vah]
+
+vpDrawNew(bool update) =>
+    if bar_index > vpLookback and update and array.sum(vpGreen) + array.sum(vpRed) > 0.0
+        float g   = (vpProfHigh - vpProfLow) / i_resolution
+        float lft = bar_index[vpLookback]
+        float rgt = bar_index[int(vpLookback / 1.4)]
+        float mxv = array.max(vpGreen) + array.max(vpRed)
+        float buf = g / 10.0
+        if i_showVPLab
+            label.new(int((bar_index - 1 + lft) / 2), vpProfHigh, i_sessType,
+                 color = color.rgb(0,0,0,100), textcolor = chart.fg_color, size = size.tiny)
+        if i_showProf
+            for i = 0 to array.size(vpRed) - 1
+                float zt = array.get(vpZoneBounds, i)
+                float ge = lft + (rgt - lft) * (array.get(vpGreen, i) / mxv)
+                float re = ge  + (rgt - lft) * (array.get(vpRed, i)  / mxv)
+                if i_dispMode == "Mode 2"
+                    box.new(int(lft), zt - buf, int(ge), zt - g + buf, bgcolor = i_bullCol, border_width = 0)
+                    box.new(int(ge),  zt - buf, int(re), zt - g + buf, bgcolor = i_bearCol, border_width = 0)
+                else if i_dispMode == "Mode 1"
+                    box.new(int(lft), zt - buf, int(ge), zt - g + buf, bgcolor = i_bullCol, border_width = 0)
+                else
+                    box.new(int(lft),                      zt - buf, int(ge), zt - g + buf, bgcolor = i_bullCol, border_width = 0)
+                    box.new(int(lft) - int(re) + int(ge),  zt - buf, int(lft), zt - g + buf, bgcolor = i_bearCol, border_width = 0)
+        box.new(int(lft), vpProfHigh, bar_index - 1, vpProfLow,
+             chart.fg_color, i_boxWid, line.style_dashed, bgcolor = i_boxBg)
+        float poc = vpPocLevel()
+        [val, vah] = vpValueLevels(poc)
+        if i_showPoc
+            line.new(int(lft), poc, bar_index - 1, poc, color = i_pocCol, width = i_pocWid)
+        if i_showVA
+            line.new(int(lft), vah, bar_index - 1, vah, color = i_vahCol, width = i_vahWid)
+            line.new(int(lft), val, bar_index - 1, val, color = i_valCol, width = i_valWid)
+        if i_showVAb
+            box.new(int(lft), vah, bar_index - 1, val,
+                 border_color = color.rgb(54,58,69,100), bgcolor = i_VAbCol)
+
+vpDrawCur(bool update, bool del) =>
+    var line vpPocLn = na
+    var line vpVahLn = na
+    var line vpValLn = na
+    var box  vpOutBx = na
+    var label vpLab  = na
+    var box[] vpRedBx = array.new_box(i_resolution, na)
+    var box[] vpGrnBx = array.new_box(i_resolution, na)
+    if bar_index > vpLookback and update and array.sum(vpGreen) + array.sum(vpRed) > 0.0
+        line.delete(vpPocLn)
+        line.delete(vpVahLn)
+        line.delete(vpValLn)
+        box.delete(vpOutBx)
+        label.delete(vpLab)
+        for i = 0 to array.size(vpRedBx) - 1
+            box.delete(array.get(vpRedBx, i))
+            box.delete(array.get(vpGrnBx, i))
+        float g   = (vpProfHigh - vpProfLow) / i_resolution
+        float lft = bar_index[vpLookback]
+        float rgt = bar_index[int(vpLookback / 1.4)]
+        float mxv = array.max(vpGreen) + array.max(vpRed)
+        float buf = g / 10.0
+        if i_showVPLab
+            vpLab := label.new(int((bar_index - 1 + lft) / 2), vpProfHigh, i_sessType,
+                 color = color.rgb(0,0,0,100), textcolor = chart.fg_color, size = size.tiny)
+        if i_showProf
+            for i = 0 to array.size(vpRed) - 1
+                float zt = array.get(vpZoneBounds, i)
+                float ge = lft + (rgt - lft) * (array.get(vpGreen, i) / mxv)
+                float re = ge  + (rgt - lft) * (array.get(vpRed, i)  / mxv)
+                if i_dispMode == "Mode 2"
+                    array.set(vpGrnBx, i, box.new(int(lft), zt - buf, int(ge), zt - g + buf, bgcolor = i_bullCol, border_width = 0))
+                    array.set(vpRedBx, i, box.new(int(ge),  zt - buf, int(re), zt - g + buf, bgcolor = i_bearCol, border_width = 0))
+                else if i_dispMode == "Mode 1"
+                    array.set(vpGrnBx, i, box.new(int(lft), zt - buf, int(ge), zt - g + buf, bgcolor = i_bullCol, border_width = 0))
+                else
+                    array.set(vpGrnBx, i, box.new(int(lft),                     zt - buf, int(ge),   zt - g + buf, bgcolor = i_bullCol, border_width = 0))
+                    array.set(vpRedBx, i, box.new(int(lft) - int(re) + int(ge), zt - buf, int(lft),  zt - g + buf, bgcolor = i_bearCol, border_width = 0))
+        vpOutBx := box.new(int(lft), vpProfHigh, bar_index - 1, vpProfLow,
+             chart.fg_color, i_boxWid, line.style_dashed, bgcolor = i_boxBg)
+        float poc = vpPocLevel()
+        [val, vah] = vpValueLevels(poc)
+        if i_showPoc
+            vpPocLn := line.new(int(lft), poc, bar_index - 1, poc, color = i_pocCol, width = i_pocWid)
+        if i_showVA
+            vpVahLn := line.new(int(lft), vah, bar_index - 1, vah, color = i_vahCol, width = i_vahWid)
+            vpValLn := line.new(int(lft), val, bar_index - 1, val, color = i_valCol, width = i_valWid)
+        if i_showVAb
+            box.new(int(lft), vah, bar_index - 1, val,
+                 border_color = color.rgb(54,58,69,100), bgcolor = i_VAbCol)
+    if del
+        box.delete(vpOutBx)
+        line.delete(vpPocLn)
+        line.delete(vpVahLn)
+        line.delete(vpValLn)
+        for i = 0 to array.size(vpGrnBx) - 1
+            box.delete(array.get(vpGrnBx, i))
+        for i = 0 to array.size(vpRedBx) - 1
+            box.delete(array.get(vpRedBx, i))
+
+vpDrawForex(float startBar, string title, float top, float bottom) =>
+    box.new(int(startBar), top, bar_index - 1, bottom,
+         chart.fg_color, i_boxWid, line.style_dashed, bgcolor = i_boxBg)
+    if i_showVPLab
+        label.new(int((bar_index - 1 + startBar) / 2), top, title,
+             color = color.rgb(0,0,0,100), textcolor = chart.fg_color)
+
+vpUpdateIntra(array<float> o, array<float> h, array<float> l, array<float> c, array<float> v) =>
+    if array.size(o) > 0
+        for i = 0 to array.size(o) - 1
+            array.push(ltfO, array.get(o, i))
+            array.push(ltfH, array.get(h, i))
+            array.push(ltfL, array.get(l, i))
+            array.push(ltfC, array.get(c, i))
+            array.push(ltfV, array.get(v, i))
+
+// Session detection (preserved from original)
+bool vpNewDaily     = dayofweek != dayofweek[1]
+bool vpNewWeekly    = weekofyear != weekofyear[1]
+bool vpNewMonthly   = (dayofmonth != dayofmonth[1] + 1) and (dayofmonth != dayofmonth[1])
+bool vpNewYearly    = year != year[1]
+bool vpNewQuarterly = month != month[1] and (month - 1) % 3 == 0
+
+int _utcH          = hour(time(timeframe.period, "0000-2400", "GMT"), "GMT")
+bool vpNewTokyo    = _utcH != _utcH[1] + 1 and _utcH != _utcH[1]
+bool vpEndTokyo    = _utcH >= 9  and _utcH[1] < 9
+bool vpNewLondon   = _utcH >= 7  and _utcH[1] < 7
+bool vpEndLondon   = _utcH >= 16 and _utcH[1] < 16
+bool vpNewNY       = _utcH >= 13 and _utcH[1] < 13
+bool vpEndNY       = _utcH >= 22 and _utcH[1] < 22
+
+bool vpNewSession = switch i_sessType
+    "Tokyo"     => vpNewTokyo
+    "London"    => vpNewLondon
+    "New York"  => vpNewNY
+    "Daily"     => vpNewDaily
+    "Weekly"    => vpNewWeekly
+    "Monthly"   => vpNewMonthly
+    "Yearly"    => vpNewYearly
+    "Quarterly" => vpNewQuarterly
+    => vpNewDaily
+
+bool vpZoneEnd = switch i_sessType
+    "Tokyo"     => vpEndTokyo
+    "London"    => vpEndLondon
+    "New York"  => vpEndNY
+    "Daily"     => vpNewDaily
+    "Weekly"    => vpNewWeekly
+    "Monthly"   => vpNewMonthly
+    "Yearly"    => vpNewYearly
+    "Quarterly" => vpNewQuarterly
+    => vpNewDaily
+
+vpCalcSession(vpZoneEnd or (barstate.islast and i_showCur))
+vpDrawNew(vpZoneEnd)
+vpDrawCur(barstate.islast and not vpZoneEnd and i_showCur and vpActiveZone, vpZoneEnd)
+vpReset(vpNewSession)
+vpUpdateIntra(dO, dH, dL, dC, dV)
+
+if vpZoneEnd
+    vpActiveZone := false
+if vpNewSession
+    vpZoneStart  := bar_index
+    vpActiveZone := true
+if vpNewLondon
+    vpLondonStart := bar_index
+if vpNewTokyo
+    vpTokyoStart  := bar_index
+if vpNewNY
+    vpNYStart     := bar_index
+
+float vpLondonHigh = ta.highest(high, math.max(bar_index - vpLondonStart + 1, 1))
+float vpTokyoHigh  = ta.highest(high, math.max(bar_index - vpTokyoStart  + 1, 1))
+float vpNYHighH    = ta.highest(high, math.max(bar_index - vpNYStart     + 1, 1))
+float vpLondonLow  = ta.lowest(low,   math.max(bar_index - vpLondonStart + 1, 1))
+float vpTokyoLow   = ta.lowest(low,   math.max(bar_index - vpTokyoStart  + 1, 1))
+float vpNYLowL     = ta.lowest(low,   math.max(bar_index - vpNYStart     + 1, 1))
+
+if vpEndLondon and i_showFx
+    vpDrawForex(vpLondonStart, "London",   vpLondonHigh, vpLondonLow)
+if vpEndNY and i_showFx
+    vpDrawForex(vpNYStart,     "New York", vpNYHighH,    vpNYLowL)
+if vpEndTokyo and i_showFx
+    vpDrawForex(vpTokyoStart,  "Tokyo",    vpTokyoHigh,  vpTokyoLow)
+
+// Live POC / VAH / VAL for scoring
+float curPoc = vpPocLevel()
+[curVal, curVah] = vpValueLevels(curPoc)
+
+// ============================================================
+// HTF BIAS MODULE
+// ============================================================
+
+[d_c, d_e20, d_e50] = request.security(syminfo.tickerid, "D",
+     [close, ta.ema(close, i_htfFast), ta.ema(close, i_htfSlow)],
+     lookahead = barmerge.lookahead_off)
+
+[h4_c, h4_e20, h4_e50] = request.security(syminfo.tickerid, "240",
+     [close, ta.ema(close, i_htfFast), ta.ema(close, i_htfSlow)],
+     lookahead = barmerge.lookahead_off)
+
+[h1_c, h1_e20, h1_e50] = request.security(syminfo.tickerid, "60",
+     [close, ta.ema(close, i_htfFast), ta.ema(close, i_htfSlow)],
+     lookahead = barmerge.lookahead_off)
+
+int dailyBias = d_c  > d_e20  and d_e20  > d_e50  ? 1 : d_c  < d_e20  and d_e20  < d_e50  ? -1 : 0
+int h4Bias    = h4_c > h4_e20 and h4_e20 > h4_e50 ? 1 : h4_c < h4_e20 and h4_e20 < h4_e50 ? -1 : 0
+int h1Bias    = h1_c > h1_e20 and h1_e20 > h1_e50 ? 1 : h1_c < h1_e20 and h1_e20 < h1_e50 ? -1 : 0
+int htfScore  = dailyBias + h4Bias + h1Bias
+
+// ============================================================
+// VWAP MODULE
+// ============================================================
+
+float vwapVal  = ta.vwap(hlc3)
+float wkVwap   = request.security(syminfo.tickerid, "W",
+     ta.vwap(hlc3), lookahead = barmerge.lookahead_off)
+
+bool aboveVWAP   = close > vwapVal
+bool aboveWkVWAP = close > wkVwap
+bool vwapReclaim = close > vwapVal and close[1] <= vwapVal[1]
+bool vwapReject  = close < vwapVal and close[1] >= vwapVal[1]
+
+plot(i_showVWAP   ? vwapVal : na, "VWAP",         color = i_vwapCol,   linewidth = 2)
+plot(i_showWkVWAP ? wkVwap  : na, "Weekly VWAP",  color = i_wkVwapCol, linewidth = 2,
+     style = plot.style_stepline)
+
+// ============================================================
+// MARKET STRUCTURE MODULE
+// ============================================================
+
+float atr    = ta.atr(i_atrLen)
+float avgVol = ta.sma(volume, 20)
+bool  volSpike = volume > avgVol * 1.5
+
+// Rolling structure levels from closed bars (non-repainting)
+float nearHigh = ta.highest(high, i_nearLen)[1]
+float nearLow  = ta.lowest(low,  i_nearLen)[1]
+float farHigh  = ta.highest(high, i_farLen)[1]
+float farLow   = ta.lowest(low,  i_farLen)[1]
+
+// Trend direction via far structure breaks
 var int  trendDir  = 0
 var bool bullBOS   = false
 var bool bearBOS   = false
@@ -142,45 +539,104 @@ bearBOS   := false
 bullCHoCH := false
 bearCHoCH := false
 
-crossAboveFar = close > farHigh and close[1] <= farHigh
-crossBelowFar = close < farLow  and close[1] >= farLow
+bool crossAboveFar = close > farHigh and close[1] <= farHigh
+bool crossBelowFar = close < farLow  and close[1] >= farLow
 
 if crossAboveFar
-    if trendDir >= 0
-        bullBOS := true
-    else
-        bullCHoCH := true
-    trendDir := 1
+    bullBOS   := trendDir >= 0
+    bullCHoCH := trendDir < 0
+    trendDir  := 1
 
 if crossBelowFar
-    if trendDir <= 0
-        bearBOS := true
-    else
-        bearCHoCH := true
-    trendDir := -1
+    bearBOS   := trendDir <= 0
+    bearCHoCH := trendDir > 0
+    trendDir  := -1
 
-// Liquidity Sweep — wick pierces near structure, close reclaims
-bullSweep_bar = low  < nearLow  and close > nearLow
-bearSweep_bar = high > nearHigh and close < nearHigh
+bool bullStructure = trendDir == 1
+bool bearStructure = trendDir == -1
 
-var float lastBullSweepLow  = na
-var float lastBearSweepHigh = na
+// Confirmed pivot highs/lows for swing tracking (non-repainting — offset by pivLen)
+float pivH = ta.pivothigh(high, i_pivLen, i_pivLen)
+float pivL = ta.pivotlow(low,   i_pivLen, i_pivLen)
 
-if bullSweep_bar
-    lastBullSweepLow := low
-if bearSweep_bar
-    lastBearSweepHigh := high
+var float[] swingH    = array.new_float(0)
+var float[] swingL    = array.new_float(0)
+var int[]   swingHBar = array.new_int(0)
+var int[]   swingLBar = array.new_int(0)
 
-recentBullSweep = ta.barssince(bullSweep_bar) <= i_sweepWin
-recentBearSweep = ta.barssince(bearSweep_bar) <= i_sweepWin
+if not na(pivH)
+    array.unshift(swingH,    pivH)
+    array.unshift(swingHBar, bar_index[i_pivLen])
+    if array.size(swingH) > 6
+        array.pop(swingH)
+        array.pop(swingHBar)
 
-// ===========================================================
-// FAIR VALUE GAP  (3-candle imbalance)
-// ===========================================================
+if not na(pivL)
+    array.unshift(swingL,    pivL)
+    array.unshift(swingLBar, bar_index[i_pivLen])
+    if array.size(swingL) > 6
+        array.pop(swingL)
+        array.pop(swingLBar)
 
-minFVG      = atr * i_fvgMinATR
-bullFVG_bar = low  > high[2] and (low    - high[2]) >= minFVG
-bearFVG_bar = high < low[2]  and (low[2] - high   ) >= minFVG
+// Structure shift recency window (for signal scoring)
+var bool recentBullShift = false
+var bool recentBearShift = false
+var int  bullShiftBar    = 0
+var int  bearShiftBar    = 0
+
+if bullBOS or bullCHoCH
+    recentBullShift := true
+    bullShiftBar    := bar_index
+if bearBOS or bearCHoCH
+    recentBearShift := true
+    bearShiftBar    := bar_index
+if bar_index - bullShiftBar > 20
+    recentBullShift := false
+if bar_index - bearShiftBar > 20
+    recentBearShift := false
+
+// BOS / CHoCH labels
+if i_showBOS
+    if bullBOS
+        label.new(bar_index, low - atr * 0.4, "BOS",
+             style = label.style_label_up,
+             color = color.new(color.lime, 20), textcolor = color.black, size = size.tiny)
+    if bearBOS
+        label.new(bar_index, high + atr * 0.4, "BOS",
+             style = label.style_label_down,
+             color = color.new(color.red, 20), textcolor = color.white, size = size.tiny)
+    if bullCHoCH
+        label.new(bar_index, low - atr * 0.4, "CHoCH",
+             style = label.style_label_up,
+             color = color.new(color.aqua, 20), textcolor = color.black, size = size.tiny)
+    if bearCHoCH
+        label.new(bar_index, high + atr * 0.4, "CHoCH",
+             style = label.style_label_down,
+             color = color.new(color.fuchsia, 20), textcolor = color.white, size = size.tiny)
+
+// Swing markers
+if i_showStr and not na(pivH)
+    label.new(bar_index[i_pivLen], high[i_pivLen], "▲",
+         style = label.style_none, textcolor = color.rgb(0,200,100), size = size.tiny)
+if i_showStr and not na(pivL)
+    label.new(bar_index[i_pivLen], low[i_pivLen], "▼",
+         style = label.style_none, textcolor = color.rgb(220,50,50), size = size.tiny)
+
+// EMA plots for visual reference
+float emaF = ta.ema(close, 9)
+float emaM = ta.ema(close, 20)
+float emaS = ta.ema(close, 50)
+plot(i_showStr ? emaF : na, "EMA 9",  color = color.new(color.yellow, 0), linewidth = 1)
+plot(i_showStr ? emaM : na, "EMA 20", color = color.new(color.orange, 0), linewidth = 1)
+plot(i_showStr ? emaS : na, "EMA 50", color = color.new(color.red,    0), linewidth = 2)
+
+// ============================================================
+// FAIR VALUE GAP MODULE
+// ============================================================
+
+float minFVG   = atr * i_fvgMinATR
+bool bullFVG_b = low  > high[2] and (low    - high[2]) >= minFVG
+bool bearFVG_b = high < low[2]  and (low[2] - high   ) >= minFVG
 
 var float bFVG_top = na
 var float bFVG_bot = na
@@ -189,391 +645,591 @@ var float vFVG_top = na
 var float vFVG_bot = na
 var bool  vFVG_on  = false
 
-if i_fvgOn and bullFVG_bar
+if bullFVG_b
     bFVG_top := low
     bFVG_bot := high[2]
     bFVG_on  := true
-
-if i_fvgOn and bearFVG_bar
+if bearFVG_b
     vFVG_top := low[2]
     vFVG_bot := high
     vFVG_on  := true
-
 if bFVG_on and close < bFVG_bot
     bFVG_on := false
 if vFVG_on and close > vFVG_top
     vFVG_on := false
 
-inBullFVG     = bFVG_on and close >= bFVG_bot and close <= bFVG_top
-inBearFVG     = vFVG_on and close >= vFVG_bot and close <= vFVG_top
-recentBullFVG = ta.barssince(bullFVG_bar) <= i_fvgWin
-recentBearFVG = ta.barssince(bearFVG_bar) <= i_fvgWin
+bool inBullFVG     = bFVG_on and close >= bFVG_bot and close <= bFVG_top
+bool inBearFVG     = vFVG_on and close >= vFVG_bot and close <= vFVG_top
+bool recentBullFVG = ta.barssince(bullFVG_b) <= i_fvgWin
+bool recentBearFVG = ta.barssince(bearFVG_b) <= i_fvgWin
 
-// ===========================================================
-// DISPLACEMENT CANDLE  (zero lag, per-bar)
-// ===========================================================
-
-body   = math.abs(close - open)
-range_ = high - low
-
-bullDisp_bar = body > atr * 1.3 and close > open and close >= low  + range_ * 0.70
-bearDisp_bar = body > atr * 1.3 and close < open and close <= high - range_ * 0.70
-
-recentBullDisp = ta.barssince(bullDisp_bar) <= i_displLen
-recentBearDisp = ta.barssince(bearDisp_bar) <= i_displLen
-
-// ===========================================================
-// DELTA / CVD  (zero lag)
-// ===========================================================
-
-buyEst  = volume * math.max(close - low,   0.0) / math.max(range_, 1e-9)
-sellEst = volume * math.max(high  - close, 0.0) / math.max(range_, 1e-9)
-delta   = buyEst - sellEst
-
-var float cvd = 0.0
-cvd := cvd[1] + delta
-
-deltaPos = delta > 0
-deltaNeg = delta < 0
-cvdUp    = cvd > cvd[3]
-cvdDown  = cvd < cvd[3]
-
-// ===========================================================
-// TREND / MOMENTUM FILTERS
-// ===========================================================
-
-emaBull  = emaF > emaM
-emaBear  = emaF < emaM
-vwapBull = close > vwap_val
-vwapBear = close < vwap_val
-rsiBull  = rsi > i_rsiBullMin and rsi > rsi[1]
-rsiBear  = rsi < i_rsiBearMax and rsi < rsi[1]
-atrOk    = (high - low) > atr * 0.35
-volOk    = volume > avgVol * 0.75
-
-// ===========================================================
-// SIGNAL CONDITIONS
-// ===========================================================
-
-// Long
-c_ses_L     = inSession
-c_sweep_L   = recentBullSweep
-c_trend_L   = trendDir >= 0 or emaBull
-c_ema_L     = emaBull
-c_vwap_L    = vwapBull
-c_impulse_L = recentBullDisp or inBullFVG or recentBullFVG
-c_vol_L     = volSpike or relVol > 1.0
-c_rsi_L     = rsiBull
-c_delta_L   = deltaPos or cvdUp
-c_noise_L   = atrOk and volOk
-
-buyCondition = c_ses_L and c_sweep_L and c_trend_L and c_ema_L
-     and c_vwap_L and c_impulse_L and c_vol_L and c_rsi_L
-     and c_delta_L and c_noise_L
-
-// Short
-c_ses_S     = inSession
-c_sweep_S   = recentBearSweep
-c_trend_S   = trendDir <= 0 or emaBear
-c_ema_S     = emaBear
-c_vwap_S    = vwapBear
-c_impulse_S = recentBearDisp or inBearFVG or recentBearFVG
-c_vol_S     = volSpike or relVol > 1.0
-c_rsi_S     = rsiBear
-c_delta_S   = deltaNeg or cvdDown
-c_noise_S   = atrOk and volOk
-
-sellCondition = c_ses_S and c_sweep_S and c_trend_S and c_ema_S
-     and c_vwap_S and c_impulse_S and c_vol_S and c_rsi_S
-     and c_delta_S and c_noise_S
-
-noPos      = strategy.position_size == 0
-buySignal  = buyCondition  and noPos
-sellSignal = sellCondition and noPos
-
-// ===========================================================
-// STOP LOSS
-// ===========================================================
-
-atrBuf = atr * i_atrMult
-
-var float longSL  = na
-var float shortSL = na
-
-if buySignal
-    float ref = nz(lastBullSweepLow, nearLow)
-    longSL   := math.min(ref, low) - atrBuf
-
-if sellSignal
-    float ref = nz(lastBearSweepHigh, nearHigh)
-    shortSL  := math.max(ref, high) + atrBuf
-
-// ===========================================================
-// TAKE PROFIT
-// ===========================================================
-
-var float lTP1 = na
-var float lTP2 = na
-var float lTP3 = na
-var float lRun = na
-var float sTP1 = na
-var float sTP2 = na
-var float sTP3 = na
-var float sRun = na
-
-if buySignal and not na(longSL)
-    float r = close - longSL
-    lTP1 := close + r * i_tp1R
-    lTP2 := close + r * i_tp2R
-    lTP3 := close + r * i_tp3R
-    lRun := close + r * i_runR
-
-if sellSignal and not na(shortSL)
-    float r = shortSL - close
-    sTP1 := close - r * i_tp1R
-    sTP2 := close - r * i_tp2R
-    sTP3 := close - r * i_tp3R
-    sRun := close - r * i_runR
-
-// ===========================================================
-// STRATEGY EXECUTION
-// ===========================================================
-
-if buySignal
-    strategy.entry("Long",  strategy.long,  comment = "ISP Buy")
-
-if sellSignal
-    strategy.entry("Short", strategy.short, comment = "ISP Sell")
-
-if strategy.position_size > 0 and not na(longSL)
-    strategy.exit("L-TP1", "Long",  qty_percent = i_tp1pct, limit = lTP1, stop = longSL,  comment = "TP1")
-    strategy.exit("L-TP2", "Long",  qty_percent = i_tp2pct, limit = lTP2, stop = longSL,  comment = "TP2")
-    strategy.exit("L-TP3", "Long",  qty_percent = i_tp3pct, limit = lTP3, stop = longSL,  comment = "TP3")
-    strategy.exit("L-Run", "Long",  qty_percent = 100,      limit = lRun,  stop = longSL,  comment = "Runner")
-
-if strategy.position_size < 0 and not na(shortSL)
-    strategy.exit("S-TP1", "Short", qty_percent = i_tp1pct, limit = sTP1, stop = shortSL, comment = "TP1")
-    strategy.exit("S-TP2", "Short", qty_percent = i_tp2pct, limit = sTP2, stop = shortSL, comment = "TP2")
-    strategy.exit("S-TP3", "Short", qty_percent = i_tp3pct, limit = sTP3, stop = shortSL, comment = "TP3")
-    strategy.exit("S-Run", "Short", qty_percent = 100,      limit = sRun,  stop = shortSL, comment = "Runner")
-
-// ===========================================================
-// VISUAL
-// ===========================================================
-
-bgcolor(i_showSessBG and inSession ? color.new(color.blue, 93) : na, title = "Session BG")
-
-plot(i_showEMAs ? emaF : na, "EMA Fast", color = color.new(color.yellow, 0), linewidth = 1)
-plot(i_showEMAs ? emaM : na, "EMA Mid",  color = color.new(color.orange, 0), linewidth = 1)
-plot(i_showEMAs ? emaS : na, "EMA Slow", color = color.new(color.red,    0), linewidth = 2)
-plot(i_showVWAP ? vwap_val : na, "VWAP", color = color.new(color.purple, 0), linewidth = 2)
-
-plot(i_showSesHL and inSession ? sessionHigh : na, "Sess H",
-     color = color.new(color.teal,   0), style = plot.style_stepline, linewidth = 1)
-plot(i_showSesHL and inSession ? sessionLow  : na, "Sess L",
-     color = color.new(color.maroon, 0), style = plot.style_stepline, linewidth = 1)
-
-plot(i_showStr ? nearHigh : na, "Near High",
-     color = color.new(color.silver, 50), style = plot.style_stepline, linewidth = 1)
-plot(i_showStr ? nearLow  : na, "Near Low",
-     color = color.new(color.silver, 50), style = plot.style_stepline, linewidth = 1)
-
-plotshape(i_showBOS and bullBOS,   location = location.belowbar, style = shape.labelup,
-     color = color.new(color.lime,    0), text = "BOS",   textcolor = color.black, size = size.tiny)
-plotshape(i_showBOS and bearBOS,   location = location.abovebar, style = shape.labeldown,
-     color = color.new(color.red,     0), text = "BOS",   textcolor = color.white, size = size.tiny)
-plotshape(i_showBOS and bullCHoCH, location = location.belowbar, style = shape.labelup,
-     color = color.new(color.aqua,    0), text = "CHoCH", textcolor = color.black, size = size.tiny)
-plotshape(i_showBOS and bearCHoCH, location = location.abovebar, style = shape.labeldown,
-     color = color.new(color.fuchsia, 0), text = "CHoCH", textcolor = color.white, size = size.tiny)
-
-plotshape(bullSweep_bar, location = location.belowbar, style = shape.circle,
-     color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
-plotshape(bearSweep_bar, location = location.abovebar, style = shape.circle,
-     color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
-
-if i_showFVG and i_fvgOn
-    if bullFVG_bar
+if i_showFVG
+    if bullFVG_b
         line.new(bar_index, low,     bar_index + 20, low,
              color = color.new(color.green, 50), style = line.style_dashed, width = 1)
         line.new(bar_index, high[2], bar_index + 20, high[2],
              color = color.new(color.green, 50), style = line.style_dashed, width = 1)
-    if bearFVG_bar
+    if bearFVG_b
         line.new(bar_index, low[2],  bar_index + 20, low[2],
-             color = color.new(color.red,   50), style = line.style_dashed, width = 1)
+             color = color.new(color.red, 50), style = line.style_dashed, width = 1)
         line.new(bar_index, high,    bar_index + 20, high,
-             color = color.new(color.red,   50), style = line.style_dashed, width = 1)
+             color = color.new(color.red, 50), style = line.style_dashed, width = 1)
 
-plotshape(buySignal,  location = location.belowbar, style = shape.triangleup,
-     color = color.new(color.lime, 0), size = size.normal, title = "Buy Signal")
-plotshape(sellSignal, location = location.abovebar, style = shape.triangledown,
-     color = color.new(color.red,  0), size = size.normal, title = "Sell Signal")
+// ============================================================
+// DISPLACEMENT + DELTA / CVD MODULE
+// ============================================================
 
-// SL / TP lines + labels
-if i_showSLTP
-    int ext = bar_index + 35
+float body_  = math.abs(close - open)
+float range_ = high - low
+bool  bullDisp = body_ > atr * 1.3 and close > open and close >= low  + range_ * 0.70
+bool  bearDisp = body_ > atr * 1.3 and close < open and close <= high - range_ * 0.70
 
-    if buySignal and not na(longSL)
-        float riskL = close - longSL
-        label.new(bar_index, low - atr * 0.7,
-             "LONG @ " + fmtP(close) + "\nRisk " + fmtP(riskL) + " pts",
-             color     = color.new(color.lime, 10),
-             textcolor = color.black,
-             style     = label.style_label_up,
-             size      = size.small,
-             xloc      = xloc.bar_index)
-        drawLevel(bar_index, longSL, ext,
-             color.new(color.red,   0), color.new(color.red,   10), color.white,
-             "SL  " + fmtP(longSL))
-        drawLevel(bar_index, lTP1, ext,
-             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
-             "TP1 " + fmtP(lTP1) + " (" + str.tostring(i_tp1R) + "R)")
-        drawLevel(bar_index, lTP2, ext,
-             color.new(color.green, 0), color.new(color.green, 10), color.white,
-             "TP2 " + fmtP(lTP2) + " (" + str.tostring(i_tp2R) + "R)")
-        drawLevel(bar_index, lTP3, ext,
-             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
-             "TP3 " + fmtP(lTP3) + " (" + str.tostring(i_tp3R) + "R)")
-        drawLevel(bar_index, lRun, ext,
-             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
-             "RUN " + fmtP(lRun)  + " (" + str.tostring(i_runR)  + "R)")
+bool recentBullDisp = ta.barssince(bullDisp) <= 3
+bool recentBearDisp = ta.barssince(bearDisp) <= 3
 
-    if sellSignal and not na(shortSL)
-        float riskS = shortSL - close
-        label.new(bar_index, high + atr * 0.7,
-             "SHORT @ " + fmtP(close) + "\nRisk " + fmtP(riskS) + " pts",
-             color     = color.new(color.red, 10),
-             textcolor = color.white,
-             style     = label.style_label_down,
-             size      = size.small,
-             xloc      = xloc.bar_index)
-        drawLevel(bar_index, shortSL, ext,
-             color.new(color.red,   0), color.new(color.red,   10), color.white,
-             "SL  " + fmtP(shortSL))
-        drawLevel(bar_index, sTP1, ext,
-             color.new(color.lime,  0), color.new(color.lime,  10), color.black,
-             "TP1 " + fmtP(sTP1) + " (" + str.tostring(i_tp1R) + "R)")
-        drawLevel(bar_index, sTP2, ext,
-             color.new(color.green, 0), color.new(color.green, 10), color.white,
-             "TP2 " + fmtP(sTP2) + " (" + str.tostring(i_tp2R) + "R)")
-        drawLevel(bar_index, sTP3, ext,
-             color.new(color.teal,  0), color.new(color.teal,  10), color.white,
-             "TP3 " + fmtP(sTP3) + " (" + str.tostring(i_tp3R) + "R)")
-        drawLevel(bar_index, sRun, ext,
-             color.new(color.aqua,  0), color.new(color.aqua,  10), color.black,
-             "RUN " + fmtP(sRun)  + " (" + str.tostring(i_runR)  + "R)")
+float rng2   = math.max(range_, 1e-9)
+float buyEst = volume * math.max(close - low,   0.0) / rng2
+float selEst = volume * math.max(high  - close, 0.0) / rng2
+float delta  = buyEst - selEst
 
-// ===========================================================
+var float cvd = 0.0
+cvd := cvd[1] + delta
+
+bool deltaPos = delta > 0.0
+bool deltaNeg = delta < 0.0
+bool cvdUp    = cvd > cvd[3]
+bool cvdDown  = cvd < cvd[3]
+
+// ============================================================
+// LIQUIDITY MODULE
+// ============================================================
+
+// Sweep: wick pierces structure, close reclaims — zero-lag, no repainting
+bool bullSweep_b = low  < nearLow  and close > nearLow
+bool bearSweep_b = high > nearHigh and close < nearHigh
+
+var float lastBullSweepLow  = na
+var float lastBearSweepHigh = na
+if bullSweep_b
+    lastBullSweepLow  := low
+if bearSweep_b
+    lastBearSweepHigh := high
+
+bool recentBullSweep = ta.barssince(bullSweep_b) <= i_sweepWin
+bool recentBearSweep = ta.barssince(bearSweep_b) <= i_sweepWin
+
+// Equal highs/lows from confirmed pivots
+bool  eqHighDetected = false
+bool  eqLowDetected  = false
+float eqHighLevel    = na
+float eqLowLevel     = na
+
+if array.size(swingH) >= 2
+    float h0 = array.get(swingH, 0)
+    float h1x = array.get(swingH, 1)
+    if h1x != 0.0 and math.abs(h0 - h1x) / h1x * 100.0 <= i_liqTol
+        eqHighDetected := true
+        eqHighLevel    := math.max(h0, h1x)
+
+if array.size(swingL) >= 2
+    float l0 = array.get(swingL, 0)
+    float l1x = array.get(swingL, 1)
+    if l1x != 0.0 and math.abs(l0 - l1x) / l1x * 100.0 <= i_liqTol
+        eqLowDetected := true
+        eqLowLevel    := math.min(l0, l1x)
+
+// Managed equal-level lines (single line each — no runaway object count)
+var line eqHighLine = na
+var line eqLowLine  = na
+
+if i_showLiq
+    if eqHighDetected and not na(eqHighLevel) and array.size(swingHBar) >= 2
+        line.delete(eqHighLine)
+        eqHighLine := line.new(array.get(swingHBar, 1), eqHighLevel, bar_index + 5, eqHighLevel,
+             color = color.new(color.yellow, 50), style = line.style_dotted, width = 1)
+    else if not eqHighDetected
+        line.delete(eqHighLine)
+        eqHighLine := na
+
+    if eqLowDetected and not na(eqLowLevel) and array.size(swingLBar) >= 2
+        line.delete(eqLowLine)
+        eqLowLine := line.new(array.get(swingLBar, 1), eqLowLevel, bar_index + 5, eqLowLevel,
+             color = color.new(color.yellow, 50), style = line.style_dotted, width = 1)
+    else if not eqLowDetected
+        line.delete(eqLowLine)
+        eqLowLine := na
+
+// Sweep markers
+if i_showSweeps
+    plotshape(bullSweep_b, location = location.belowbar, style = shape.circle,
+         color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
+    plotshape(bearSweep_b, location = location.abovebar, style = shape.circle,
+         color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
+
+// ============================================================
+// OPENING RANGE BREAKOUT MODULE
+// ============================================================
+
+int barHHMM_EST = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+int barMinsUTC  = hour(time, "Etc/UTC") * 60 + minute(time, "Etc/UTC")
+
+bool nyOpen   = barHHMM_EST >= 930 and barHHMM_EST[1] < 930
+bool lonOpen  = barMinsUTC  >= 480 and barMinsUTC[1]  < 480
+bool asiaOpen = barMinsUTC  < 30   and barMinsUTC[1]  >= 1410
+
+var int   nyORBStart   = 0
+var int   lonORBStart  = 0
+var int   asiaORBStart = 0
+var float nyORBH       = na
+var float nyORBL       = na
+var float lonORBH      = na
+var float lonORBL      = na
+var float asiaORBH     = na
+var float asiaORBL     = na
+var bool  nyORBDone    = false
+var bool  lonORBDone   = false
+var bool  asiaORBDone  = false
+var box   nyORBBox     = na
+var box   lonORBBox    = na
+var box   asiaORBBox   = na
+
+// Calculate bars needed for ORB window
+float tfSecs   = timeframe.in_seconds()
+float tfMins   = math.max(tfSecs / 60.0, 1.0)
+int   orbBars  = math.max(int(math.ceil(i_orbMins / tfMins)), 1)
+
+if nyOpen and i_showNYORB
+    nyORBStart := bar_index
+    nyORBH     := high
+    nyORBL     := low
+    nyORBDone  := false
+    box.delete(nyORBBox)
+
+if lonOpen and i_showLonORB
+    lonORBStart := bar_index
+    lonORBH     := high
+    lonORBL     := low
+    lonORBDone  := false
+    box.delete(lonORBBox)
+
+if asiaOpen and i_showAsiaORB
+    asiaORBStart := bar_index
+    asiaORBH     := high
+    asiaORBL     := low
+    asiaORBDone  := false
+    box.delete(asiaORBBox)
+
+int bfNY   = bar_index - nyORBStart
+int bfLon  = bar_index - lonORBStart
+int bfAsia = bar_index - asiaORBStart
+
+// Expand range during ORB window
+if i_showNYORB and not nyORBDone and bfNY > 0 and bfNY <= orbBars
+    nyORBH := math.max(nz(nyORBH), high)
+    nyORBL := math.min(nz(nyORBL, 1e12), low)
+
+if i_showLonORB and not lonORBDone and bfLon > 0 and bfLon <= orbBars
+    lonORBH := math.max(nz(lonORBH), high)
+    lonORBL := math.min(nz(lonORBL, 1e12), low)
+
+if i_showAsiaORB and not asiaORBDone and bfAsia > 0 and bfAsia <= orbBars
+    asiaORBH := math.max(nz(asiaORBH), high)
+    asiaORBL := math.min(nz(asiaORBL, 1e12), low)
+
+// Finalise ORB box on first bar after window closes
+if i_showNYORB and not nyORBDone and bfNY == orbBars + 1 and not na(nyORBH) and i_showORB
+    nyORBDone := true
+    nyORBBox  := box.new(nyORBStart, nyORBH, bar_index, nyORBL,
+         border_color = color.new(color.yellow, 30), border_width = 1,
+         bgcolor = color.rgb(255,200,0,92),
+         text = "NY ORB", text_color = chart.fg_color, text_size = size.tiny)
+
+if i_showLonORB and not lonORBDone and bfLon == orbBars + 1 and not na(lonORBH) and i_showORB
+    lonORBDone := true
+    lonORBBox  := box.new(lonORBStart, lonORBH, bar_index, lonORBL,
+         border_color = color.new(color.blue, 30), border_width = 1,
+         bgcolor = color.rgb(100,150,255,92),
+         text = "LON ORB", text_color = chart.fg_color, text_size = size.tiny)
+
+if i_showAsiaORB and not asiaORBDone and bfAsia == orbBars + 1 and not na(asiaORBH) and i_showORB
+    asiaORBDone := true
+    asiaORBBox  := box.new(asiaORBStart, asiaORBH, bar_index, asiaORBL,
+         border_color = color.new(color.gray, 30), border_width = 1,
+         bgcolor = color.rgb(200,200,200,92),
+         text = "ASIA ORB", text_color = chart.fg_color, text_size = size.tiny)
+
+// Extend ORB boxes forward
+if i_showORB
+    if not na(nyORBBox)
+        box.set_right(nyORBBox,   bar_index)
+    if not na(lonORBBox)
+        box.set_right(lonORBBox,  bar_index)
+    if not na(asiaORBBox)
+        box.set_right(asiaORBBox, bar_index)
+
+// ORB breakout signals
+bool orbBullBreak = (nyORBDone  and not na(nyORBH)  and close > nyORBH  and close[1] <= nyORBH)  or
+                   (lonORBDone and not na(lonORBH) and close > lonORBH and close[1] <= lonORBH)
+bool orbBearBreak = (nyORBDone  and not na(nyORBL)  and close < nyORBL  and close[1] >= nyORBL)  or
+                   (lonORBDone and not na(lonORBL) and close < lonORBL and close[1] >= lonORBL)
+
+var bool recentOrbBull = false
+var bool recentOrbBear = false
+var int  orbBullBar    = 0
+var int  orbBearBar    = 0
+
+if orbBullBreak
+    recentOrbBull := true
+    orbBullBar    := bar_index
+if orbBearBreak
+    recentOrbBear := true
+    orbBearBar    := bar_index
+if bar_index - orbBullBar > 10
+    recentOrbBull := false
+if bar_index - orbBearBar > 10
+    recentOrbBear := false
+
+// ============================================================
+// SCORING SYSTEM  (max 100 pts)
+// ============================================================
+
+// HTF Alignment — 25 pts
+int htfBullPts = (dailyBias ==  1 ? 9 : dailyBias == 0 ? 4 : 0) +
+                 (h4Bias    ==  1 ? 9 : h4Bias    == 0 ? 4 : 0) +
+                 (h1Bias    ==  1 ? 7 : h1Bias    == 0 ? 3 : 0)
+int htfBearPts = (dailyBias == -1 ? 9 : dailyBias == 0 ? 4 : 0) +
+                 (h4Bias    == -1 ? 9 : h4Bias    == 0 ? 4 : 0) +
+                 (h1Bias    == -1 ? 7 : h1Bias    == 0 ? 3 : 0)
+
+// Liquidity Sweep — 20 pts
+int liqBullPts = recentBullSweep ? 20 : 0
+int liqBearPts = recentBearSweep ? 20 : 0
+
+// VWAP Confirmation — 15 pts
+int vwapBullPts = aboveVWAP and aboveWkVWAP ? 15 : aboveVWAP ? 8 : 0
+int vwapBearPts = (not aboveVWAP) and (not aboveWkVWAP) ? 15 : (not aboveVWAP) ? 8 : 0
+
+// Volume / Order Flow Expansion — 15 pts
+int volBullPts = volSpike and close > open ? 15 :
+                 volSpike               ? 8  :
+                 deltaPos and cvdUp     ? 5  : 0
+int volBearPts = volSpike and close < open ? 15 :
+                 volSpike               ? 8  :
+                 deltaNeg and cvdDown   ? 5  : 0
+
+// Structure / FVG / Displacement — 15 pts
+int strBullPts = recentBullShift               ? 15 :
+                 bullStructure                 ? 8  :
+                 (recentBullFVG or inBullFVG) ? 5  :
+                 recentBullDisp                ? 3  : 0
+int strBearPts = recentBearShift               ? 15 :
+                 bearStructure                 ? 8  :
+                 (recentBearFVG or inBearFVG) ? 5  :
+                 recentBearDisp                ? 3  : 0
+
+// ORB Confirmation — 10 pts
+int orbBullPts = recentOrbBull ? 10 : 0
+int orbBearPts = recentOrbBear ? 10 : 0
+
+// VP Position bonus (replaces nothing — additive up to max per category)
+bool aboveVA = close > nz(curVah)
+bool belowVA = close < nz(curVal)
+
+// Final totals
+int longScore  = math.min(htfBullPts + liqBullPts + vwapBullPts + volBullPts + strBullPts + orbBullPts, 100)
+int shortScore = math.min(htfBearPts + liqBearPts + vwapBearPts + volBearPts + strBearPts + orbBearPts, 100)
+
+string longGrade  = getGrade(longScore)
+string shortGrade = getGrade(shortScore)
+
+// ============================================================
+// SIGNAL GENERATION + FILTERING
+// ============================================================
+
+// HTF must be at least neutral on daily and 4H
+bool htfLongOK  = dailyBias >= 0 and h4Bias >= 0
+bool htfShortOK = dailyBias <= 0 and h4Bias <= 0
+
+// Per-session counter (reset on new daily open)
+var int sessLongCnt  = 0
+var int sessShortCnt = 0
+if vpNewDaily
+    sessLongCnt  := 0
+    sessShortCnt := 0
+
+// Dedup consecutive same-direction signals
+var bool lastWasLong  = false
+var bool lastWasShort = false
+
+// Hard requirements beyond score: must have a sweep + VWAP confirmation
+bool rawLong  = i_showSig and longScore  >= i_minScore and htfLongOK  and
+                sessLongCnt  < i_maxSig and recentBullSweep and
+                (aboveVWAP or vwapReclaim)
+bool rawShort = i_showSig and shortScore >= i_minScore and htfShortOK and
+                sessShortCnt < i_maxSig and recentBearSweep and
+                ((not aboveVWAP) or vwapReject)
+
+bool longSignal  = rawLong  and not lastWasLong
+bool shortSignal = rawShort and not lastWasShort
+
+if longSignal
+    sessLongCnt  := sessLongCnt  + 1
+    lastWasLong  := true
+    lastWasShort := false
+if shortSignal
+    sessShortCnt  := sessShortCnt + 1
+    lastWasShort  := true
+    lastWasLong   := false
+
+// ============================================================
+// TRADE MANAGEMENT — SL / TP
+// ============================================================
+
+float atrBuf = atr * i_atrMult
+
+var float longSL  = na
+var float longTP1 = na
+var float longTP2 = na
+var float longTP3 = na
+var float shortSL  = na
+var float shortTP1 = na
+var float shortTP2 = na
+var float shortTP3 = na
+
+if longSignal
+    float ref = nz(lastBullSweepLow, nearLow)
+    longSL    := math.min(ref, low) - atrBuf
+    float r   = close - longSL
+    longTP1   := close + r * i_tp1R
+    longTP2   := close + r * i_tp2R
+    longTP3   := close + r * i_tp3R
+
+if shortSignal
+    float ref  = nz(lastBearSweepHigh, nearHigh)
+    shortSL   := math.max(ref, high) + atrBuf
+    float r   = shortSL - close
+    shortTP1  := close - r * i_tp1R
+    shortTP2  := close - r * i_tp2R
+    shortTP3  := close - r * i_tp3R
+
+int extBars = bar_index + 50
+
+if i_showSLTP and longSignal and not na(longSL)
+    line.new(bar_index, close,   extBars, close,   color = color.new(color.lime,   0), style = line.style_solid,  width = 1)
+    line.new(bar_index, longSL,  extBars, longSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1)
+    line.new(bar_index, longTP1, extBars, longTP1, color = color.new(color.lime,   0), style = line.style_dotted, width = 1)
+    line.new(bar_index, longTP2, extBars, longTP2, color = color.new(color.green,  0), style = line.style_dotted, width = 2)
+    line.new(bar_index, longTP3, extBars, longTP3, color = color.new(color.teal,   0), style = line.style_solid,  width = 2)
+    label.new(extBars, longSL,  "SL "  + fmtP(longSL),  style = label.style_label_left, color = color.new(color.red,   40), textcolor = color.white, size = size.tiny)
+    label.new(extBars, longTP1, "TP1 " + fmtP(longTP1), style = label.style_label_left, color = color.new(color.lime,  40), textcolor = color.black, size = size.tiny)
+    label.new(extBars, longTP2, "TP2 " + fmtP(longTP2), style = label.style_label_left, color = color.new(color.green, 40), textcolor = color.white, size = size.tiny)
+    label.new(extBars, longTP3, "TP3 " + fmtP(longTP3), style = label.style_label_left, color = color.new(color.teal,  40), textcolor = color.white, size = size.tiny)
+
+if i_showSLTP and shortSignal and not na(shortSL)
+    line.new(bar_index, close,    extBars, close,    color = color.new(color.red,    0), style = line.style_solid,  width = 1)
+    line.new(bar_index, shortSL,  extBars, shortSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1)
+    line.new(bar_index, shortTP1, extBars, shortTP1, color = color.new(color.orange, 0), style = line.style_dotted, width = 1)
+    line.new(bar_index, shortTP2, extBars, shortTP2, color = color.new(color.maroon, 0), style = line.style_dotted, width = 2)
+    line.new(bar_index, shortTP3, extBars, shortTP3, color = color.new(color.purple, 0), style = line.style_solid,  width = 2)
+    label.new(extBars, shortSL,  "SL "  + fmtP(shortSL),  style = label.style_label_left, color = color.new(color.red,    40), textcolor = color.white, size = size.tiny)
+    label.new(extBars, shortTP1, "TP1 " + fmtP(shortTP1), style = label.style_label_left, color = color.new(color.orange, 40), textcolor = color.white, size = size.tiny)
+    label.new(extBars, shortTP2, "TP2 " + fmtP(shortTP2), style = label.style_label_left, color = color.new(color.maroon, 40), textcolor = color.white, size = size.tiny)
+    label.new(extBars, shortTP3, "TP3 " + fmtP(shortTP3), style = label.style_label_left, color = color.new(color.purple, 40), textcolor = color.white, size = size.tiny)
+
+// ============================================================
+// SIGNAL LABELS  (grade + full confluence breakdown)
+// ============================================================
+
+if longSignal
+    float riskL = not na(longSL) ? close - longSL : atr * 2.0
+    string reasons =
+         (htfBullPts  >= 17 ? "✓ HTF Bullish\n"       : "  HTF Mixed\n") +
+         (liqBullPts  > 0   ? "✓ Sellside Sweep\n"    : "") +
+         (vwapBullPts > 0   ? "✓ VWAP Confirmed\n"    : "") +
+         (volBullPts  > 0   ? "✓ Volume Expansion\n"  : "") +
+         (strBullPts  > 0   ? "✓ Bullish Structure\n" : "") +
+         (orbBullPts  > 0   ? "✓ ORB Breakout\n"      : "") +
+         "Risk: " + fmtP(riskL)
+    label.new(bar_index, low - atr * 1.8,
+         longGrade + " LONG  " + str.tostring(longScore) + "pts\n" + reasons,
+         style     = label.style_label_up,
+         color     = color.new(color.lime, 5),
+         textcolor = color.black,
+         size      = size.normal)
+
+if shortSignal
+    float riskS = not na(shortSL) ? shortSL - close : atr * 2.0
+    string reasons =
+         (htfBearPts  >= 17 ? "✓ HTF Bearish\n"       : "  HTF Mixed\n") +
+         (liqBearPts  > 0   ? "✓ Buyside Sweep\n"     : "") +
+         (vwapBearPts > 0   ? "✓ VWAP Rejected\n"     : "") +
+         (volBearPts  > 0   ? "✓ Volume Expansion\n"  : "") +
+         (strBearPts  > 0   ? "✓ Bearish Structure\n" : "") +
+         (orbBearPts  > 0   ? "✓ ORB Breakdown\n"     : "") +
+         "Risk: " + fmtP(riskS)
+    label.new(bar_index, high + atr * 1.8,
+         shortGrade + " SHORT  " + str.tostring(shortScore) + "pts\n" + reasons,
+         style     = label.style_label_down,
+         color     = color.new(color.red, 5),
+         textcolor = color.white,
+         size      = size.normal)
+
+// ============================================================
 // DASHBOARD
-// ===========================================================
+// ============================================================
 
-if i_showDash
-    string td = trendDir == 1 ? "BULL" : trendDir == -1 ? "BEAR" : "NEUT"
-    string sv = inSession ? "ACTIVE" : "OFF"
-    string vl = volSpike  ? "SPIKE"  : relVol > 1.0 ? "NORM" : "LOW"
-    string vw = vwapBull  ? "ABOVE"  : "BELOW"
-    string em = emaBull   ? "BULL"   : "BEAR"
-    string sw = recentBullSweep ? "BULL SWEEP" : recentBearSweep ? "BEAR SWEEP" : "none"
-    string po = strategy.position_size > 0 ? "LONG"  :
-                strategy.position_size < 0 ? "SHORT" : "FLAT"
+var table dashTbl = table.new(
+     i_dashPos == "Top Right"    ? position.top_right    :
+     i_dashPos == "Top Left"     ? position.top_left     :
+     i_dashPos == "Bottom Right" ? position.bottom_right : position.bottom_left,
+     columns = 2, rows = 17,
+     bgcolor      = color.rgb(10, 10, 15, 10),
+     border_color = color.rgb(80, 80, 100, 40),
+     border_width = 1)
 
-    int    tot = strategy.wintrades + strategy.losstrades
-    string wr  = tot > 0
-         ? str.tostring(math.round(strategy.wintrades / tot * 100, 1)) + "%"
-         : "N/A"
-    string pf  = strategy.grossloss != 0
-         ? str.tostring(math.round(strategy.grossprofit / math.abs(strategy.grossloss), 2))
-         : "N/A"
+if i_showDash and barstate.islast
+    color bgH = color.rgb(30, 30, 60)
+    color bgR = color.rgb(20, 20, 30)
+    color cG  = color.rgb(0, 200, 100)
+    color cR  = color.rgb(220, 50, 50)
+    color cO  = color.orange
+    color cW  = color.white
+    color cGr = color.gray
 
-    string dashText =
-         "=== ISP v1.3 ===\n" +
-         "Session : " + sv + "\n" +
-         "Trend   : " + td + "\n" +
-         "EMA     : " + em + "\n" +
-         "VWAP    : " + vw + "\n" +
-         "Volume  : " + vl + " (" + str.tostring(math.round(relVol, 2)) + "x)\n" +
-         "RSI     : " + str.tostring(math.round(rsi, 1)) + "\n" +
-         "Sweep   : " + sw + "\n" +
-         "----------------\n" +
-         "Position: " + po + "\n" +
-         "Win Rate: " + wr + "\n" +
-         "Prof Fac: " + pf + "\n" +
-         "Net PnL : $" + str.tostring(math.round(strategy.netprofit, 2))
+    table.cell(dashTbl, 0, 0, "  INSTITUTIONAL EDGE + VP  ",
+         text_color = cW, bgcolor = bgH, text_size = size.small, colspan = 2)
 
-    var table dash = table.new(position.top_right, 1, 1,
-         bgcolor      = color.new(color.black, 10),
-         border_color = color.new(color.gray,  30),
-         border_width = 1,
-         frame_color  = color.new(color.gray,  20),
-         frame_width  = 1)
-    table.cell(dash, 0, 0, dashText,
-         text_color = color.white,
-         text_size  = size.small,
-         bgcolor    = color.new(color.black, 15))
+    string htfStr = htfScore >= 2 ? "▲ BULLISH" : htfScore <= -2 ? "▼ BEARISH" : "◆ MIXED"
+    color  htfCl  = htfScore >= 2 ? cG          : htfScore <= -2 ? cR          : cO
+    table.cell(dashTbl, 0, 1, "HTF BIAS",    text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 1, htfStr,        text_color = htfCl, bgcolor = bgR, text_size = size.small)
 
-// ===========================================================
-// CONDITION DEBUG TABLE  (enable in Visual settings)
-// ===========================================================
+    string dS = dailyBias == 1 ? "D▲" : dailyBias == -1 ? "D▼" : "D◆"
+    string hS = h4Bias    == 1 ? "4H▲" : h4Bias   == -1 ? "4H▼" : "4H◆"
+    string iS = h1Bias    == 1 ? "1H▲" : h1Bias   == -1 ? "1H▼" : "1H◆"
+    table.cell(dashTbl, 0, 2, "TF BIAS",     text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 2, dS + "  " + hS + "  " + iS, text_color = cW, bgcolor = bgR, text_size = size.small)
 
-if i_showDebug
+    string trS = trendDir ==  1 ? "▲ HH/HL" : trendDir == -1 ? "▼ LH/LL" : "◆ RANGE"
+    color  trC = trendDir ==  1 ? cG         : trendDir == -1 ? cR         : cO
+    table.cell(dashTbl, 0, 3, "STRUCTURE",   text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 3, trS,           text_color = trC, bgcolor = bgR, text_size = size.small)
+
+    string vwS = aboveVWAP ? "▲ ABOVE" : "▼ BELOW"
+    color  vwC = aboveVWAP ? cG        : cR
+    table.cell(dashTbl, 0, 4, "VWAP",        text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 4, vwS,           text_color = vwC, bgcolor = bgR, text_size = size.small)
+
+    string wvS = aboveWkVWAP ? "▲ ABOVE" : "▼ BELOW"
+    color  wvC = aboveWkVWAP ? cG         : cR
+    table.cell(dashTbl, 0, 5, "WK VWAP",     text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 5, wvS,           text_color = wvC, bgcolor = bgR, text_size = size.small)
+
+    string vpPos = aboveVA ? "▲ ABOVE VA" : belowVA ? "▼ BELOW VA" : "◆ IN VALUE"
+    color  vpPC  = aboveVA ? cG           : belowVA ? cR           : cO
+    table.cell(dashTbl, 0, 6, "VP POSITION", text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 6, vpPos,         text_color = vpPC, bgcolor = bgR, text_size = size.small)
+
+    string lqS = recentBullSweep ? "▲ SSL SWEPT" : recentBearSweep ? "▼ BSL SWEPT" :
+                 eqHighDetected  ? "⚡ EQ HIGHS" : eqLowDetected   ? "⚡ EQ LOWS"  : "— NEUTRAL"
+    color  lqC = recentBullSweep ? cG             : recentBearSweep ? cR             : cO
+    table.cell(dashTbl, 0, 7, "LIQUIDITY",   text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 7, lqS,           text_color = lqC, bgcolor = bgR, text_size = size.small)
+
+    string vlS = volSpike       ? "✓ EXPANDING"  :
+                 volume > avgVol ? "◆ ABOVE AVG" : "— BELOW AVG"
+    color  vlC = volSpike       ? cG              :
+                 volume > avgVol ? cO              : cGr
+    table.cell(dashTbl, 0, 8, "VOLUME",      text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 8, vlS,           text_color = vlC, bgcolor = bgR, text_size = size.small)
+
+    string cvdS = cvdUp ? "▲ BUYING" : cvdDown ? "▼ SELLING" : "◆ FLAT"
+    color  cvdC = cvdUp ? cG         : cvdDown  ? cR          : cO
+    table.cell(dashTbl, 0, 9, "CVD",         text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 9, cvdS,          text_color = cvdC, bgcolor = bgR, text_size = size.small)
+
+    string fvgS = inBullFVG     ? "▲ IN BULL FVG" :
+                  inBearFVG     ? "▼ IN BEAR FVG" :
+                  recentBullFVG ? "◆ BULL FVG"    :
+                  recentBearFVG ? "◆ BEAR FVG"    : "—"
+    color  fvgC = inBullFVG     ? cG               : inBearFVG ? cR : cO
+    table.cell(dashTbl, 0, 10, "FVG",        text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 10, fvgS,         text_color = fvgC, bgcolor = bgR, text_size = size.small)
+
+    string orbS = nyORBDone ? "NY ACTIVE" : lonORBDone ? "LON ACTIVE" :
+                  asiaORBDone ? "ASIA ACTIVE" : "BUILDING"
+    table.cell(dashTbl, 0, 11, "ORB",        text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 11, orbS,         text_color = cW,  bgcolor = bgR, text_size = size.small)
+
+    string lgS = longGrade != "X" ?
+         longGrade + "  (" + str.tostring(longScore) + " pts)" :
+         "NO TRADE (" + str.tostring(longScore) + ")"
+    color lgC = longScore >= 80 ? color.rgb(0,255,100) : longScore >= 60 ? cG : cGr
+    table.cell(dashTbl, 0, 12, "LONG GRADE",  text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 12, lgS,           text_color = lgC, bgcolor = bgR, text_size = size.small)
+
+    string sgS = shortGrade != "X" ?
+         shortGrade + "  (" + str.tostring(shortScore) + " pts)" :
+         "NO TRADE (" + str.tostring(shortScore) + ")"
+    color sgC = shortScore >= 80 ? color.rgb(255,100,50) : shortScore >= 60 ? cR : cGr
+    table.cell(dashTbl, 0, 13, "SHORT GRADE", text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 13, sgS,           text_color = sgC, bgcolor = bgR, text_size = size.small)
+
+    table.cell(dashTbl, 0, 14, "SIGNALS",     text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 14, "L: " + str.tostring(sessLongCnt) + "   S: " + str.tostring(sessShortCnt),
+         text_color = cW, bgcolor = bgR, text_size = size.small)
+
+    string sessStr = barHHMM_EST >= 930 and barHHMM_EST < 1600 ? "NEW YORK" :
+                     barMinsUTC  >= 480 and barMinsUTC  < 960  ? "LONDON"   :
+                     barMinsUTC  < 540  or  barMinsUTC  >= 1380 ? "ASIA"    : "OVERLAP"
+    table.cell(dashTbl, 0, 15, "SESSION",     text_color = cGr, bgcolor = bgR, text_size = size.small)
+    table.cell(dashTbl, 1, 15, sessStr,       text_color = cW,  bgcolor = bgR, text_size = size.small)
+
+    table.cell(dashTbl, 0, 16, "MIN SCORE: " + str.tostring(i_minScore),
+         text_color = cGr, bgcolor = color.rgb(15,15,25), text_size = size.tiny, colspan = 2)
+
+// ============================================================
+// DEBUG TABLE
+// ============================================================
+
+if i_showDebug and barstate.islast
     string dbg =
-         "-- LONG CONDITIONS --\n" +
-         fmtOk(c_ses_L)     + " Session\n" +
-         fmtOk(c_sweep_L)   + " Bull Sweep (" + str.tostring(ta.barssince(bullSweep_bar)) + "b ago)\n" +
-         fmtOk(c_trend_L)   + " Trend dir=" + str.tostring(trendDir) + "\n" +
-         fmtOk(c_ema_L)     + " EMA Fast > Mid\n" +
-         fmtOk(c_vwap_L)    + " Above VWAP\n" +
-         fmtOk(c_impulse_L) + " Displacement or FVG\n" +
-         fmtOk(c_vol_L)     + " Volume " + str.tostring(math.round(relVol, 2)) + "x\n" +
-         fmtOk(c_rsi_L)     + " RSI " + str.tostring(math.round(rsi, 1)) + "\n" +
-         fmtOk(c_delta_L)   + " Delta positive\n" +
-         fmtOk(c_noise_L)   + " Range and vol OK\n" +
-         "-- SHORT CONDITIONS --\n" +
-         fmtOk(c_ses_S)     + " Session\n" +
-         fmtOk(c_sweep_S)   + " Bear Sweep (" + str.tostring(ta.barssince(bearSweep_bar)) + "b ago)\n" +
-         fmtOk(c_trend_S)   + " Trend\n" +
-         fmtOk(c_ema_S)     + " EMA Fast < Mid\n" +
-         fmtOk(c_vwap_S)    + " Below VWAP\n" +
-         fmtOk(c_impulse_S) + " Displacement or FVG\n" +
-         fmtOk(c_vol_S)     + " Volume\n" +
-         fmtOk(c_rsi_S)     + " RSI\n" +
-         fmtOk(c_delta_S)   + " Delta negative\n" +
-         fmtOk(c_noise_S)   + " Range and vol OK"
+         "── LONG ──\n"                                                            +
+         fmtOk(htfLongOK)       + " HTF aligned\n"                                +
+         fmtOk(recentBullSweep) + " Bull sweep (w=" + str.tostring(i_sweepWin) + ")\n" +
+         fmtOk(aboveVWAP)       + " Above VWAP\n"                                 +
+         fmtOk(bullStructure)   + " Bull structure\n"                             +
+         fmtOk(volSpike)        + " Vol spike\n"                                  +
+         fmtOk(recentOrbBull)   + " ORB bull break\n"                             +
+         "Score: " + str.tostring(longScore) + " / Grade: " + longGrade + "\n"    +
+         "── SHORT ──\n"                                                           +
+         fmtOk(htfShortOK)      + " HTF aligned\n"                                +
+         fmtOk(recentBearSweep) + " Bear sweep (w=" + str.tostring(i_sweepWin) + ")\n" +
+         fmtOk(not aboveVWAP)   + " Below VWAP\n"                                 +
+         fmtOk(bearStructure)   + " Bear structure\n"                             +
+         fmtOk(volSpike)        + " Vol spike\n"                                  +
+         fmtOk(recentOrbBear)   + " ORB bear break\n"                             +
+         "Score: " + str.tostring(shortScore) + " / Grade: " + shortGrade
 
-    var table tbl = table.new(position.bottom_left, 1, 1,
+    var table dbgTbl = table.new(position.bottom_left, 1, 1,
          bgcolor      = color.new(color.black, 10),
          border_color = color.new(color.gray,  30),
          border_width = 1)
-    table.cell(tbl, 0, 0, dbg,
-         text_color = color.white,
-         text_size  = size.tiny,
+    table.cell(dbgTbl, 0, 0, dbg,
+         text_color = color.white, text_size = size.tiny,
          bgcolor    = color.new(color.black, 15))
 
-// ===========================================================
+// ============================================================
 // ALERTS
-// ===========================================================
+// ============================================================
 
-alertcondition(buySignal,
-     title = "ISP Buy Signal",
-     message = "ISP Buy | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(sellSignal,
-     title = "ISP Sell Signal",
-     message = "ISP Sell | {{ticker}} @ {{close}} | {{time}}")
-alertcondition(bullSweep_bar,
-     title = "ISP Bull Sweep",
-     message = "Bull liquidity sweep | {{ticker}} @ {{close}}")
-alertcondition(bearSweep_bar,
-     title = "ISP Bear Sweep",
-     message = "Bear liquidity sweep | {{ticker}} @ {{close}}")
-alertcondition(bullBOS,
-     title = "ISP Bull BOS",
-     message = "Bullish BOS | {{ticker}} @ {{close}}")
-alertcondition(bearBOS,
-     title = "ISP Bear BOS",
-     message = "Bearish BOS | {{ticker}} @ {{close}}")
-alertcondition(trendDir ==  1 and trendDir[1] !=  1,
-     title = "ISP Trend to Bull",
-     message = "Trend flipped BULL | {{ticker}}")
-alertcondition(trendDir == -1 and trendDir[1] != -1,
-     title = "ISP Trend to Bear",
-     message = "Trend flipped BEAR | {{ticker}}")
+alertcondition(longSignal,   title = "IE+VP Long Signal",    message = "Long Signal | {{ticker}} @ {{close}} | Check grade on chart")
+alertcondition(shortSignal,  title = "IE+VP Short Signal",   message = "Short Signal | {{ticker}} @ {{close}} | Check grade on chart")
+alertcondition(bullSweep_b,  title = "IE+VP Bull Sweep",     message = "Bullish Liquidity Sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweep_b,  title = "IE+VP Bear Sweep",     message = "Bearish Liquidity Sweep | {{ticker}} @ {{close}}")
+alertcondition(bullBOS,      title = "IE+VP Bull BOS",       message = "Bullish Break of Structure | {{ticker}}")
+alertcondition(bearBOS,      title = "IE+VP Bear BOS",       message = "Bearish Break of Structure | {{ticker}}")
+alertcondition(bullCHoCH,    title = "IE+VP Bull CHoCH",     message = "Bullish Change of Character | {{ticker}}")
+alertcondition(bearCHoCH,    title = "IE+VP Bear CHoCH",     message = "Bearish Change of Character | {{ticker}}")
+alertcondition(orbBullBreak, title = "IE+VP ORB Bull Break", message = "ORB Bullish Breakout | {{ticker}}")
+alertcondition(orbBearBreak, title = "IE+VP ORB Bear Break", message = "ORB Bearish Breakdown | {{ticker}}")
