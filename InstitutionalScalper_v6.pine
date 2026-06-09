@@ -867,10 +867,12 @@ if i_showORB
         box.set_right(asiaORBBox, bar_index)
 
 // ORB breakout signals
-bool orbBullBreak = (nyORBDone  and not na(nyORBH)  and close > nyORBH  and close[1] <= nyORBH)  or \
-                   (lonORBDone and not na(lonORBH) and close > lonORBH and close[1] <= lonORBH)
-bool orbBearBreak = (nyORBDone  and not na(nyORBL)  and close < nyORBL  and close[1] >= nyORBL)  or \
-                   (lonORBDone and not na(lonORBL) and close < lonORBL and close[1] >= lonORBL)
+bool _orbBullNY  = nyORBDone  and not na(nyORBH)  and close > nyORBH  and close[1] <= nyORBH
+bool _orbBullLon = lonORBDone and not na(lonORBH) and close > lonORBH and close[1] <= lonORBH
+bool orbBullBreak = _orbBullNY or _orbBullLon
+bool _orbBearNY  = nyORBDone  and not na(nyORBL)  and close < nyORBL  and close[1] >= nyORBL
+bool _orbBearLon = lonORBDone and not na(lonORBL) and close < lonORBL and close[1] >= lonORBL
+bool orbBearBreak = _orbBearNY or _orbBearLon
 
 var bool recentOrbBull = false
 var bool recentOrbBear = false
@@ -961,12 +963,12 @@ var bool lastWasLong  = false
 var bool lastWasShort = false
 
 // Hard requirements beyond score: must have a sweep + VWAP confirmation
-bool rawLong  = i_showSig and longScore  >= i_minScore and htfLongOK  and \
-                sessLongCnt  < i_maxSig and recentBullSweep and \
-                (aboveVWAP or vwapReclaim)
-bool rawShort = i_showSig and shortScore >= i_minScore and htfShortOK and \
-                sessShortCnt < i_maxSig and recentBearSweep and \
-                ((not aboveVWAP) or vwapReject)
+bool _rlA = i_showSig and longScore >= i_minScore and htfLongOK
+bool _rlB = sessLongCnt < i_maxSig and recentBullSweep and (aboveVWAP or vwapReclaim)
+bool rawLong = _rlA and _rlB
+bool _rsA = i_showSig and shortScore >= i_minScore and htfShortOK
+bool _rsB = sessShortCnt < i_maxSig and recentBearSweep and ((not aboveVWAP) or vwapReject)
+bool rawShort = _rsA and _rsB
 
 bool longSignal  = rawLong  and not lastWasLong
 bool shortSignal = rawShort and not lastWasShort
