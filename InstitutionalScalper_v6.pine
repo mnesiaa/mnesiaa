@@ -1053,10 +1053,12 @@ if longSignal or shortSignal
     if not na(prevSigLabel)
         label.delete(prevSigLabel)
         prevSigLabel := na
-    for i = 0 to array.size(prevSigLines) - 1
-        line.delete(array.get(prevSigLines, i))
-    for i = 0 to array.size(prevSigLabels) - 1
-        label.delete(array.get(prevSigLabels, i))
+    if array.size(prevSigLines) > 0
+        for i = 0 to array.size(prevSigLines) - 1
+            line.delete(array.get(prevSigLines, i))
+    if array.size(prevSigLabels) > 0
+        for i = 0 to array.size(prevSigLabels) - 1
+            label.delete(array.get(prevSigLabels, i))
     array.clear(prevSigLines)
     array.clear(prevSigLabels)
 
