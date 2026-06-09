@@ -1098,7 +1098,8 @@ if i_showDash and barstate.islast
     color cGr = color.gray
 
     table.cell(dashTbl, 0, 0, "  INSTITUTIONAL EDGE + VP  ",
-         text_color = cW, bgcolor = bgH, text_size = size.small, colspan = 2)
+         text_color = cW, bgcolor = bgH, text_size = size.small)
+    table.merge_cells(dashTbl, 0, 0, 1, 0)
 
     string htfStr = htfScore >= 2 ? "▲ BULLISH" : htfScore <= -2 ? "▼ BEARISH" : "◆ MIXED"
     color  htfCl  = htfScore >= 2 ? cG          : htfScore <= -2 ? cR          : cO
@@ -1187,7 +1188,8 @@ if i_showDash and barstate.islast
     table.cell(dashTbl, 1, 15, sessStr,       text_color = cW,  bgcolor = bgR, text_size = size.small)
 
     table.cell(dashTbl, 0, 16, "MIN SCORE: " + str.tostring(i_minScore),
-         text_color = cGr, bgcolor = color.rgb(15,15,25), text_size = size.tiny, colspan = 2)
+         text_color = cGr, bgcolor = color.rgb(15,15,25), text_size = size.tiny)
+    table.merge_cells(dashTbl, 0, 16, 1, 16)
 
 // ============================================================
 // DEBUG TABLE
