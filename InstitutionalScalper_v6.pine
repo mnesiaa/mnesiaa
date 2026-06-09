@@ -961,27 +961,56 @@ bool htfShortOK = dailyBias <= 0 or h4Bias <= 0
 int  longReq    = htfLongOK  ? i_minScore : math.max(i_minScore, 70)
 int  shortReq   = htfShortOK ? i_minScore : math.max(i_minScore, 70)
 
-// Per-session counter (reset on new daily open)
-var int sessLongCnt  = 0
-var int sessShortCnt = 0
-if vpNewDaily
-    sessLongCnt  := 0
-    sessShortCnt := 0
+// Per-session counters — reset when each session opens
+var int nyLongCnt    = 0
+var int nyShortCnt   = 0
+var int lonLongCnt   = 0
+var int lonShortCnt  = 0
+var int asiaLongCnt  = 0
+var int asiaShortCnt = 0
 
-// Cooldown: minimum bars between signals to avoid clusters
+if nyOpen
+    nyLongCnt   := 0
+    nyShortCnt  := 0
+if lonOpen
+    lonLongCnt  := 0
+    lonShortCnt := 0
+if asiaOpen
+    asiaLongCnt  := 0
+    asiaShortCnt := 0
+
+// Which session are we in and what are the counts
+bool inNYSess   = barHHMM_EST >= 930  and barHHMM_EST < 1600
+bool inLonSess  = barMinsUTC  >= 480  and barMinsUTC  < 960
+bool inAsiaSess = barMinsUTC  < 540   or  barMinsUTC  >= 1380
+
+int curLongCnt  = inNYSess ? nyLongCnt   : inLonSess ? lonLongCnt   : asiaLongCnt
+int curShortCnt = inNYSess ? nyShortCnt  : inLonSess ? lonShortCnt  : asiaShortCnt
+
+// Cooldown: minimum 10 bars between any signal to prevent clusters
 var int lastSigBar = 0
-bool cooldownOK = bar_index - lastSigBar > 3
+bool cooldownOK = bar_index - lastSigBar >= 10
 
-// Signal = score meets threshold + session cap not hit + cooldown clear
-bool longSignal  = i_showSig and longScore >= longReq and sessLongCnt < i_maxSig and cooldownOK
-bool shortSignal = i_showSig and shortScore >= shortReq and sessShortCnt < i_maxSig and cooldownOK and not longSignal
+// Signal fires when score threshold met + session cap not hit + cooldown clear
+bool longSignal  = i_showSig and longScore  >= longReq  and curLongCnt  < i_maxSig and cooldownOK
+bool shortSignal = i_showSig and shortScore >= shortReq and curShortCnt < i_maxSig and cooldownOK and not longSignal
 
 if longSignal
-    sessLongCnt := sessLongCnt + 1
-    lastSigBar  := bar_index
+    if inNYSess
+        nyLongCnt := nyLongCnt + 1
+    else if inLonSess
+        lonLongCnt := lonLongCnt + 1
+    else
+        asiaLongCnt := asiaLongCnt + 1
+    lastSigBar := bar_index
 if shortSignal
-    sessShortCnt := sessShortCnt + 1
-    lastSigBar   := bar_index
+    if inNYSess
+        nyShortCnt := nyShortCnt + 1
+    else if inLonSess
+        lonShortCnt := lonShortCnt + 1
+    else
+        asiaShortCnt := asiaShortCnt + 1
+    lastSigBar := bar_index
 
 // ============================================================
 // TRADE MANAGEMENT — SL / TP
@@ -1179,7 +1208,9 @@ if i_showDash and barstate.islast
     table.cell(dashTbl, 1, 13, sgS,           text_color = sgC, bgcolor = bgR, text_size = size.small)
 
     table.cell(dashTbl, 0, 14, "SIGNALS",     text_color = cGr, bgcolor = bgR, text_size = size.small)
-    table.cell(dashTbl, 1, 14, "L: " + str.tostring(sessLongCnt) + "   S: " + str.tostring(sessShortCnt),
+    int  _dL = inNYSess ? nyLongCnt  : inLonSess ? lonLongCnt  : asiaLongCnt
+    int  _dS = inNYSess ? nyShortCnt : inLonSess ? lonShortCnt : asiaShortCnt
+    table.cell(dashTbl, 1, 14, "L: " + str.tostring(_dL) + "   S: " + str.tostring(_dS),
          text_color = cW, bgcolor = bgR, text_size = size.small)
 
     string sessStr = barHHMM_EST >= 930 and barHHMM_EST < 1600 ? "NEW YORK" :
