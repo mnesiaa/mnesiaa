@@ -1045,27 +1045,42 @@ if shortSignal
 
 int extBars = bar_index + 50
 
+var label prevSigLabel = na
+var array<line>  prevSigLines  = array.new<line>()
+var array<label> prevSigLabels = array.new<label>()
+
+if longSignal or shortSignal
+    if not na(prevSigLabel)
+        label.delete(prevSigLabel)
+        prevSigLabel := na
+    for i = 0 to array.size(prevSigLines) - 1
+        line.delete(array.get(prevSigLines, i))
+    for i = 0 to array.size(prevSigLabels) - 1
+        label.delete(array.get(prevSigLabels, i))
+    array.clear(prevSigLines)
+    array.clear(prevSigLabels)
+
 if i_showSLTP and longSignal and not na(longSL)
-    line.new(bar_index, close,   extBars, close,   color = color.new(color.lime,   0), style = line.style_solid,  width = 1)
-    line.new(bar_index, longSL,  extBars, longSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1)
-    line.new(bar_index, longTP1, extBars, longTP1, color = color.new(color.lime,   0), style = line.style_dotted, width = 1)
-    line.new(bar_index, longTP2, extBars, longTP2, color = color.new(color.green,  0), style = line.style_dotted, width = 2)
-    line.new(bar_index, longTP3, extBars, longTP3, color = color.new(color.teal,   0), style = line.style_solid,  width = 2)
-    label.new(extBars, longSL,  "SL "  + fmtP(longSL),  style = label.style_label_left, color = color.new(color.red,   40), textcolor = color.white, size = size.tiny)
-    label.new(extBars, longTP1, "TP1 " + fmtP(longTP1), style = label.style_label_left, color = color.new(color.lime,  40), textcolor = color.black, size = size.tiny)
-    label.new(extBars, longTP2, "TP2 " + fmtP(longTP2), style = label.style_label_left, color = color.new(color.green, 40), textcolor = color.white, size = size.tiny)
-    label.new(extBars, longTP3, "TP3 " + fmtP(longTP3), style = label.style_label_left, color = color.new(color.teal,  40), textcolor = color.white, size = size.tiny)
+    array.push(prevSigLines, line.new(bar_index, close,   extBars, close,   color = color.new(color.lime,   0), style = line.style_solid,  width = 1))
+    array.push(prevSigLines, line.new(bar_index, longSL,  extBars, longSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1))
+    array.push(prevSigLines, line.new(bar_index, longTP1, extBars, longTP1, color = color.new(color.lime,   0), style = line.style_dotted, width = 1))
+    array.push(prevSigLines, line.new(bar_index, longTP2, extBars, longTP2, color = color.new(color.green,  0), style = line.style_dotted, width = 2))
+    array.push(prevSigLines, line.new(bar_index, longTP3, extBars, longTP3, color = color.new(color.teal,   0), style = line.style_solid,  width = 2))
+    array.push(prevSigLabels, label.new(extBars, longSL,  "SL "  + fmtP(longSL),  style = label.style_label_left, color = color.new(color.red,   40), textcolor = color.white, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, longTP1, "TP1 " + fmtP(longTP1), style = label.style_label_left, color = color.new(color.lime,  40), textcolor = color.black, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, longTP2, "TP2 " + fmtP(longTP2), style = label.style_label_left, color = color.new(color.green, 40), textcolor = color.white, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, longTP3, "TP3 " + fmtP(longTP3), style = label.style_label_left, color = color.new(color.teal,  40), textcolor = color.white, size = size.tiny))
 
 if i_showSLTP and shortSignal and not na(shortSL)
-    line.new(bar_index, close,    extBars, close,    color = color.new(color.red,    0), style = line.style_solid,  width = 1)
-    line.new(bar_index, shortSL,  extBars, shortSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1)
-    line.new(bar_index, shortTP1, extBars, shortTP1, color = color.new(color.orange, 0), style = line.style_dotted, width = 1)
-    line.new(bar_index, shortTP2, extBars, shortTP2, color = color.new(color.maroon, 0), style = line.style_dotted, width = 2)
-    line.new(bar_index, shortTP3, extBars, shortTP3, color = color.new(color.purple, 0), style = line.style_solid,  width = 2)
-    label.new(extBars, shortSL,  "SL "  + fmtP(shortSL),  style = label.style_label_left, color = color.new(color.red,    40), textcolor = color.white, size = size.tiny)
-    label.new(extBars, shortTP1, "TP1 " + fmtP(shortTP1), style = label.style_label_left, color = color.new(color.orange, 40), textcolor = color.white, size = size.tiny)
-    label.new(extBars, shortTP2, "TP2 " + fmtP(shortTP2), style = label.style_label_left, color = color.new(color.maroon, 40), textcolor = color.white, size = size.tiny)
-    label.new(extBars, shortTP3, "TP3 " + fmtP(shortTP3), style = label.style_label_left, color = color.new(color.purple, 40), textcolor = color.white, size = size.tiny)
+    array.push(prevSigLines, line.new(bar_index, close,    extBars, close,    color = color.new(color.red,    0), style = line.style_solid,  width = 1))
+    array.push(prevSigLines, line.new(bar_index, shortSL,  extBars, shortSL,  color = color.new(color.red,    0), style = line.style_dashed, width = 1))
+    array.push(prevSigLines, line.new(bar_index, shortTP1, extBars, shortTP1, color = color.new(color.orange, 0), style = line.style_dotted, width = 1))
+    array.push(prevSigLines, line.new(bar_index, shortTP2, extBars, shortTP2, color = color.new(color.maroon, 0), style = line.style_dotted, width = 2))
+    array.push(prevSigLines, line.new(bar_index, shortTP3, extBars, shortTP3, color = color.new(color.purple, 0), style = line.style_solid,  width = 2))
+    array.push(prevSigLabels, label.new(extBars, shortSL,  "SL "  + fmtP(shortSL),  style = label.style_label_left, color = color.new(color.red,    40), textcolor = color.white, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, shortTP1, "TP1 " + fmtP(shortTP1), style = label.style_label_left, color = color.new(color.orange, 40), textcolor = color.white, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, shortTP2, "TP2 " + fmtP(shortTP2), style = label.style_label_left, color = color.new(color.maroon, 40), textcolor = color.white, size = size.tiny))
+    array.push(prevSigLabels, label.new(extBars, shortTP3, "TP3 " + fmtP(shortTP3), style = label.style_label_left, color = color.new(color.purple, 40), textcolor = color.white, size = size.tiny))
 
 // ============================================================
 // SIGNAL LABELS  (grade + full confluence breakdown)
@@ -1081,7 +1096,7 @@ if longSignal
          (strBullPts  > 0   ? "✓ Bullish Structure\n" : "") +
          (orbBullPts  > 0   ? "✓ ORB Breakout\n"      : "") +
          "Risk: " + fmtP(riskL)
-    label.new(bar_index, low - atr * 1.8,
+    prevSigLabel := label.new(bar_index, low - atr * 1.8,
          longGrade + " LONG  " + str.tostring(longScore) + "pts\n" + reasons,
          style     = label.style_label_up,
          color     = color.new(color.lime, 5),
@@ -1098,7 +1113,7 @@ if shortSignal
          (strBearPts  > 0   ? "✓ Bearish Structure\n" : "") +
          (orbBearPts  > 0   ? "✓ ORB Breakdown\n"     : "") +
          "Risk: " + fmtP(riskS)
-    label.new(bar_index, high + atr * 1.8,
+    prevSigLabel := label.new(bar_index, high + atr * 1.8,
          shortGrade + " SHORT  " + str.tostring(shortScore) + "pts\n" + reasons,
          style     = label.style_label_down,
          color     = color.new(color.red, 5),
