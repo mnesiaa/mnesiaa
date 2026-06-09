@@ -1,0 +1,618 @@
+// ============================================================================
+// NY AM SESSION SCALPING STRATEGY v1.0
+// Opening Range Breakout | VWAP Reclaim/Rejection | Liquidity Sweep
+// Works on: Futures (ES/NQ), ETFs (SPY/QQQ), Forex, Stocks
+// Timeframe: 5-minute chart (recommended)
+// ============================================================================
+
+//@version=5
+strategy("NY AM Scalper — ORB + VWAP + Liquidity Sweep",
+     overlay        = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 2,
+     initial_capital = 100000,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     slippage        = 1,
+     calc_on_every_tick = false,
+     max_bars_back   = 5000)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// --- Session Settings ---
+grp_session = "SESSION SETTINGS"
+ny_start_hour   = input.int(9,  "NY Session Start Hour (EST)", minval=0, maxval=23, group=grp_session)
+ny_start_min    = input.int(30, "NY Session Start Minute",     minval=0, maxval=59, group=grp_session)
+ny_end_hour     = input.int(11, "NY Session End Hour (EST)",   minval=0, maxval=23, group=grp_session)
+ny_end_min      = input.int(0,  "NY Session End Minute",       minval=0, maxval=59, group=grp_session)
+utc_offset      = input.int(-5, "UTC Offset for EST (-5) or EDT (-4)", minval=-12, maxval=12, group=grp_session)
+cooldown_bars   = input.int(2,  "Cooldown Bars Between Trades (10-min = 2 on 5m)", minval=1, maxval=10, group=grp_session)
+
+// --- Opening Range Settings ---
+grp_orb = "OPENING RANGE BREAKOUT"
+orb_enabled     = input.bool(true,  "Enable ORB Setup", group=grp_orb)
+orb_periods     = input.int(3,      "OR Formation Bars (3 = first 15 min on 5m)", minval=1, maxval=6, group=grp_orb)
+orb_skip_bars   = input.int(1,      "Skip First N Bars After Open (avoid first 5 min)", minval=0, maxval=3, group=grp_orb)
+orb_vol_filter  = input.bool(true,  "Require Above-Avg Volume on Breakout", group=grp_orb)
+orb_max_width   = input.float(0.0,  "Max OR Width (0 = auto, uses 2x ATR)", minval=0, group=grp_orb)
+
+// --- VWAP Settings ---
+grp_vwap = "VWAP RECLAIM / REJECTION"
+vwap_enabled        = input.bool(true,  "Enable VWAP Setup", group=grp_vwap)
+vwap_reclaim_enabled = input.bool(true, "Enable VWAP Reclaim", group=grp_vwap)
+vwap_reject_enabled  = input.bool(true, "Enable VWAP Rejection", group=grp_vwap)
+vwap_body_pct       = input.float(50.0, "Min Body % of Candle for Reclaim (50 = strong body)", minval=20, maxval=90, group=grp_vwap)
+vwap_wick_ratio     = input.float(1.5,  "Min Wick:Body Ratio for Rejection", minval=1.0, maxval=5.0, group=grp_vwap)
+vwap_accept_bars    = input.int(2,      "Acceptance Bars After Reclaim", minval=1, maxval=5, group=grp_vwap)
+
+// --- Liquidity Sweep Settings ---
+grp_liq = "LIQUIDITY SWEEP"
+liq_enabled     = input.bool(true,  "Enable Liquidity Sweep Setup", group=grp_liq)
+liq_lookback    = input.int(50,     "Lookback Bars for Equal Highs/Lows", minval=10, maxval=200, group=grp_liq)
+liq_tolerance   = input.float(0.02, "Equal Level Tolerance (%)", minval=0.001, maxval=0.5, group=grp_liq)
+liq_touch_count = input.int(2,      "Min Touches to Qualify as Liquidity Level", minval=2, maxval=5, group=grp_liq)
+liq_sweep_ticks = input.float(0.01, "Min Sweep Beyond Level (%)", minval=0.001, maxval=0.5, group=grp_liq)
+
+// --- Risk Management ---
+grp_risk = "RISK MANAGEMENT"
+rr_ratio        = input.float(1.0,  "Risk:Reward Ratio (1.0 = 1:1)", minval=0.5, maxval=3.0, step=0.1, group=grp_risk)
+rr_extension    = input.float(1.5,  "Extension Target R:R (for A+ setups)", minval=1.0, maxval=3.0, step=0.1, group=grp_risk)
+use_extension   = input.bool(false, "Enable Extension Targets (partial exit at 1R)", group=grp_risk)
+atr_stop_mult   = input.float(1.0,  "ATR Multiplier for Stop Sizing", minval=0.5, maxval=3.0, step=0.1, group=grp_risk)
+atr_length      = input.int(14,     "ATR Length", minval=5, maxval=50, group=grp_risk)
+max_trades_session = input.int(3,   "Max Trades Per Session", minval=1, maxval=5, group=grp_risk)
+max_consec_loss = input.int(2,      "Kill Switch: Max Consecutive Losses", minval=1, maxval=5, group=grp_risk)
+move_be_at      = input.float(0.7,  "Move Stop to BE at X × Risk (0 = disabled)", minval=0.0, maxval=1.5, step=0.1, group=grp_risk)
+
+// --- Bias Filter ---
+grp_bias = "BIAS FILTER"
+bias_enabled    = input.bool(true,  "Enable Bias Filter", group=grp_bias)
+bias_method     = input.string("VWAP Position", "Bias Method", options=["VWAP Position", "EMA Trend", "Both Must Agree"], group=grp_bias)
+bias_ema_len    = input.int(50,     "Bias EMA Length", minval=10, maxval=200, group=grp_bias)
+
+// --- Visual Settings ---
+grp_vis = "VISUALS"
+show_or         = input.bool(true,  "Show Opening Range", group=grp_vis)
+show_vwap       = input.bool(true,  "Show VWAP Line", group=grp_vis)
+show_liq_levels = input.bool(true,  "Show Liquidity Levels", group=grp_vis)
+show_signals    = input.bool(true,  "Show Entry Signals", group=grp_vis)
+show_sl_tp      = input.bool(true,  "Show SL/TP Lines", group=grp_vis)
+show_dashboard  = input.bool(true,  "Show Dashboard", group=grp_vis)
+
+// ============================================================================
+// SESSION TIME DETECTION
+// ============================================================================
+
+est_hour = hour(time, "America/New_York")
+est_min  = minute(time, "America/New_York")
+est_time = est_hour * 100 + est_min
+
+session_start_time = ny_start_hour * 100 + ny_start_min
+session_end_time   = ny_end_hour * 100 + ny_end_min
+
+is_ny_session    = est_time >= session_start_time and est_time < session_end_time
+is_first_5_min   = est_time >= session_start_time and est_time < (ny_start_hour * 100 + ny_start_min + 5)
+is_prime_window  = est_time >= (session_start_time + 5) and est_time < 1030
+is_late_window   = est_time >= 1030 and est_time < session_end_time
+
+new_session = is_ny_session and not is_ny_session[1]
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+
+// --- ATR ---
+atr_val = ta.atr(atr_length)
+
+// --- VWAP ---
+[vwap_val, vwap_upper, vwap_lower] = ta.vwap(hlc3, is_ny_session and not is_ny_session[1], 1)
+
+// --- Volume Average ---
+vol_avg = ta.sma(volume, 20)
+above_avg_vol = volume > vol_avg
+
+// --- Bias EMA ---
+bias_ema = ta.ema(close, bias_ema_len)
+
+// --- Candle Properties ---
+body_size = math.abs(close - open)
+candle_range = high - low
+body_pct = candle_range > 0 ? (body_size / candle_range) * 100 : 0
+is_bullish = close > open
+is_bearish = close < open
+upper_wick = is_bullish ? high - close : high - open
+lower_wick = is_bullish ? open - low : close - low
+
+// ============================================================================
+// MARKET BIAS
+// ============================================================================
+
+var int bias = 0 // 1 = bullish, -1 = bearish, 0 = neutral
+
+vwap_bias  = close > vwap_val ? 1 : close < vwap_val ? -1 : 0
+ema_bias   = close > bias_ema ? 1 : close < bias_ema ? -1 : 0
+
+if bias_enabled
+    if bias_method == "VWAP Position"
+        bias := vwap_bias
+    else if bias_method == "EMA Trend"
+        bias := ema_bias
+    else // Both Must Agree
+        bias := vwap_bias == ema_bias ? vwap_bias : 0
+else
+    bias := 0
+
+// ============================================================================
+// TRADE STATE TRACKING
+// ============================================================================
+
+var int   session_trade_count = 0
+var int   consec_losses       = 0
+var int   bars_since_trade    = 100
+var float last_entry_price    = na
+var float last_stop_price     = na
+var float last_tp_price       = na
+var int   last_direction      = 0 // 1 = long, -1 = short
+var bool  kill_switch_active  = false
+var string last_setup_name    = ""
+
+if new_session
+    session_trade_count := 0
+    consec_losses       := 0
+    kill_switch_active  := false
+    bars_since_trade    := 100
+
+bars_since_trade := bars_since_trade + 1
+
+can_trade = is_ny_session and
+     not is_first_5_min and
+     session_trade_count < max_trades_session and
+     not kill_switch_active and
+     bars_since_trade >= cooldown_bars and
+     strategy.opentrades == 0
+
+// ============================================================================
+// SETUP 1: OPENING RANGE BREAKOUT
+// ============================================================================
+
+var float or_high    = na
+var float or_low     = na
+var bool  or_formed  = false
+var int   or_bar_count = 0
+
+if new_session
+    or_high      := high
+    or_low       := low
+    or_formed    := false
+    or_bar_count := 1
+else if is_ny_session and not or_formed
+    or_bar_count := or_bar_count + 1
+    or_high      := math.max(or_high, high)
+    or_low       := math.min(or_low, low)
+    if or_bar_count >= orb_periods + orb_skip_bars
+        or_formed := true
+
+or_width       = or_formed ? or_high - or_low : na
+or_too_wide    = orb_max_width > 0 ? or_width > orb_max_width : (or_width > atr_val * 2.5)
+
+orb_long_signal  = false
+orb_short_signal = false
+orb_long_stop    = 0.0
+orb_short_stop   = 0.0
+orb_long_tp      = 0.0
+orb_short_tp     = 0.0
+
+if orb_enabled and or_formed and not or_too_wide and can_trade
+    // Bullish ORB breakout
+    if close > or_high and close[1] <= or_high and is_bullish
+        if (not bias_enabled or bias >= 0)
+            if (not orb_vol_filter or above_avg_vol)
+                orb_long_signal := true
+                orb_long_stop   := or_low
+                risk = close - or_low
+                orb_long_tp     := close + (risk * rr_ratio)
+
+    // Bearish ORB breakdown
+    if close < or_low and close[1] >= or_low and is_bearish
+        if (not bias_enabled or bias <= 0)
+            if (not orb_vol_filter or above_avg_vol)
+                orb_short_signal := true
+                orb_short_stop   := or_high
+                risk = or_high - close
+                orb_short_tp     := close - (risk * rr_ratio)
+
+// ============================================================================
+// SETUP 2: VWAP RECLAIM / REJECTION
+// ============================================================================
+
+vwap_reclaim_long   = false
+vwap_reclaim_short  = false
+vwap_reject_long    = false
+vwap_reject_short   = false
+vwap_stop           = 0.0
+vwap_tp             = 0.0
+
+price_crossed_above_vwap = close > vwap_val and close[1] < vwap_val
+price_crossed_below_vwap = close < vwap_val and close[1] > vwap_val
+
+// Track bars since VWAP cross for acceptance
+var int bars_since_vwap_cross_up   = 100
+var int bars_since_vwap_cross_down = 100
+
+if price_crossed_above_vwap
+    bars_since_vwap_cross_up := 0
+else
+    bars_since_vwap_cross_up := bars_since_vwap_cross_up + 1
+
+if price_crossed_below_vwap
+    bars_since_vwap_cross_down := 0
+else
+    bars_since_vwap_cross_down := bars_since_vwap_cross_down + 1
+
+// Check if price has held above/below VWAP for acceptance period
+held_above_vwap = true
+held_below_vwap = true
+for i = 0 to vwap_accept_bars - 1
+    if close[i] < vwap_val
+        held_above_vwap := false
+    if close[i] > vwap_val
+        held_below_vwap := false
+
+if vwap_enabled and can_trade and not na(vwap_val)
+    // --- VWAP Reclaim Long ---
+    if vwap_reclaim_enabled
+        if bars_since_vwap_cross_up == vwap_accept_bars and held_above_vwap
+            if body_pct >= vwap_body_pct and is_bullish
+                if (not bias_enabled or bias >= 0)
+                    vwap_reclaim_long := true
+                    sweep_low = low
+                    for i = 0 to vwap_accept_bars
+                        sweep_low := math.min(sweep_low, low[i])
+                    vwap_stop := sweep_low - (atr_val * 0.1)
+                    risk = close - vwap_stop
+                    vwap_tp   := close + (risk * rr_ratio)
+
+        // --- VWAP Reclaim Short ---
+        if bars_since_vwap_cross_down == vwap_accept_bars and held_below_vwap
+            if body_pct >= vwap_body_pct and is_bearish
+                if (not bias_enabled or bias <= 0)
+                    vwap_reclaim_short := true
+                    sweep_high = high
+                    for i = 0 to vwap_accept_bars
+                        sweep_high := math.max(sweep_high, high[i])
+                    vwap_stop := sweep_high + (atr_val * 0.1)
+                    risk = vwap_stop - close
+                    vwap_tp   := close - (risk * rr_ratio)
+
+    // --- VWAP Rejection Long ---
+    if vwap_reject_enabled
+        wick_touches_vwap = low <= vwap_val * 1.001 and low >= vwap_val * 0.999
+        if wick_touches_vwap and is_bullish and close > vwap_val
+            if body_size > 0 and (lower_wick / body_size) >= vwap_wick_ratio
+                if (not bias_enabled or bias >= 0)
+                    vwap_reject_long := true
+                    vwap_stop := low - (atr_val * 0.2)
+                    risk = close - vwap_stop
+                    vwap_tp   := close + (risk * rr_ratio)
+
+    // --- VWAP Rejection Short ---
+    if vwap_reject_enabled
+        wick_touches_vwap_high = high >= vwap_val * 0.999 and high <= vwap_val * 1.001
+        if wick_touches_vwap_high and is_bearish and close < vwap_val
+            if body_size > 0 and (upper_wick / body_size) >= vwap_wick_ratio
+                if (not bias_enabled or bias <= 0)
+                    vwap_reject_short := true
+                    vwap_stop := high + (atr_val * 0.2)
+                    risk = vwap_stop - close
+                    vwap_tp   := close - (risk * rr_ratio)
+
+// ============================================================================
+// SETUP 3: LIQUIDITY SWEEP
+// ============================================================================
+
+liq_sweep_long  = false
+liq_sweep_short = false
+liq_stop        = 0.0
+liq_tp          = 0.0
+
+// Find equal highs (liquidity above)
+f_find_equal_highs() =>
+    level = 0.0
+    touches = 0
+    for i = 2 to liq_lookback
+        if math.abs(high[i] - high[1]) / high[1] * 100 < liq_tolerance
+            touches := touches + 1
+            if touches == 1
+                level := math.max(high[i], high[1])
+    [level, touches]
+
+// Find equal lows (liquidity below)
+f_find_equal_lows() =>
+    level = 0.0
+    touches = 0
+    for i = 2 to liq_lookback
+        if math.abs(low[i] - low[1]) / low[1] * 100 < liq_tolerance
+            touches := touches + 1
+            if touches == 1
+                level := math.min(low[i], low[1])
+    [level, touches]
+
+[eq_high_level, eq_high_touches] = f_find_equal_highs()
+[eq_low_level, eq_low_touches]   = f_find_equal_lows()
+
+// Previous day high/low as liquidity levels
+var float pdh = na
+var float pdl = na
+
+is_new_day = ta.change(time("D")) != 0
+if is_new_day
+    pdh := high[1]
+    pdl := low[1]
+    for i = 2 to 390  // look back up to ~1 day on 1-min, or full day on 5-min
+        if ta.change(time("D"))[i] != 0
+            break
+        pdh := math.max(pdh, high[i])
+        pdl := math.min(pdl, low[i])
+
+if liq_enabled and can_trade
+    // --- Sweep of equal highs / PDH (bearish reversal) ---
+    sweep_high_level = na(eq_high_level) ? na : eq_high_level
+    if eq_high_touches >= liq_touch_count and not na(sweep_high_level)
+        swept_above = high > sweep_high_level * (1 + liq_sweep_ticks / 100)
+        closed_back = close < sweep_high_level
+        if swept_above and closed_back and is_bearish
+            if (not bias_enabled or bias <= 0)
+                liq_sweep_short := true
+                liq_stop := high + (atr_val * 0.1)
+                risk = liq_stop - close
+                liq_tp   := close - (risk * rr_ratio)
+
+    // Sweep of PDH
+    if not na(pdh)
+        swept_pdh = high > pdh * (1 + liq_sweep_ticks / 100)
+        closed_back_pdh = close < pdh
+        if swept_pdh and closed_back_pdh and is_bearish and not liq_sweep_short
+            if (not bias_enabled or bias <= 0)
+                liq_sweep_short := true
+                liq_stop := high + (atr_val * 0.1)
+                risk = liq_stop - close
+                liq_tp   := close - (risk * rr_ratio)
+
+    // --- Sweep of equal lows / PDL (bullish reversal) ---
+    sweep_low_level = na(eq_low_level) ? na : eq_low_level
+    if eq_low_touches >= liq_touch_count and not na(sweep_low_level)
+        swept_below = low < sweep_low_level * (1 - liq_sweep_ticks / 100)
+        closed_back_low = close > sweep_low_level
+        if swept_below and closed_back_low and is_bullish
+            if (not bias_enabled or bias >= 0)
+                liq_sweep_long := true
+                liq_stop := low - (atr_val * 0.1)
+                risk = close - liq_stop
+                liq_tp   := close + (risk * rr_ratio)
+
+    // Sweep of PDL
+    if not na(pdl)
+        swept_pdl = low < pdl * (1 - liq_sweep_ticks / 100)
+        closed_back_pdl = close > pdl
+        if swept_pdl and closed_back_pdl and is_bullish and not liq_sweep_long
+            if (not bias_enabled or bias >= 0)
+                liq_sweep_long := true
+                liq_stop := low - (atr_val * 0.1)
+                risk = close - liq_stop
+                liq_tp   := close + (risk * rr_ratio)
+
+// ============================================================================
+// SETUP GRADING (A+ / B / C)
+// ============================================================================
+
+f_grade_setup(is_long, has_bias_align, at_key_level, strong_candle, has_volume, in_prime) =>
+    score = 0
+    score += 1  // it matched a setup (always 1)
+    score += has_bias_align ? 1 : 0
+    score += at_key_level   ? 1 : 0
+    score += strong_candle  ? 1 : 0
+    score += has_volume     ? 1 : 0
+    score += in_prime       ? 1 : 0
+    grade = score >= 5 ? 2 : score >= 3 ? 1 : 0  // 2=A+, 1=B, 0=C
+    grade
+
+// ============================================================================
+// TRADE EXECUTION
+// ============================================================================
+
+// Priority: ORB > Liquidity Sweep > VWAP (to avoid conflicts)
+
+// --- ORB Entries ---
+if orb_long_signal and can_trade
+    grade = f_grade_setup(true, bias >= 0, true, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1 // A+ or B
+        strategy.entry("ORB Long", strategy.long)
+        strategy.exit("ORB L Exit", "ORB Long", stop=orb_long_stop, limit=orb_long_tp)
+        last_entry_price    := close
+        last_stop_price     := orb_long_stop
+        last_tp_price       := orb_long_tp
+        last_direction      := 1
+        last_setup_name     := "ORB"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+if orb_short_signal and can_trade
+    grade = f_grade_setup(false, bias <= 0, true, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1
+        strategy.entry("ORB Short", strategy.short)
+        strategy.exit("ORB S Exit", "ORB Short", stop=orb_short_stop, limit=orb_short_tp)
+        last_entry_price    := close
+        last_stop_price     := orb_short_stop
+        last_tp_price       := orb_short_tp
+        last_direction      := -1
+        last_setup_name     := "ORB"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+// --- Liquidity Sweep Entries ---
+if liq_sweep_long and can_trade and not orb_long_signal
+    near_key = (not na(pdl) and math.abs(close - pdl) / close * 100 < 0.5) or eq_low_touches >= liq_touch_count
+    grade = f_grade_setup(true, bias >= 0, near_key, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1
+        strategy.entry("Liq Long", strategy.long)
+        strategy.exit("Liq L Exit", "Liq Long", stop=liq_stop, limit=liq_tp)
+        last_entry_price    := close
+        last_stop_price     := liq_stop
+        last_tp_price       := liq_tp
+        last_direction      := 1
+        last_setup_name     := "LIQ"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+if liq_sweep_short and can_trade and not orb_short_signal
+    near_key = (not na(pdh) and math.abs(close - pdh) / close * 100 < 0.5) or eq_high_touches >= liq_touch_count
+    grade = f_grade_setup(false, bias <= 0, near_key, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1
+        strategy.entry("Liq Short", strategy.short)
+        strategy.exit("Liq S Exit", "Liq Short", stop=liq_stop, limit=liq_tp)
+        last_entry_price    := close
+        last_stop_price     := liq_stop
+        last_tp_price       := liq_tp
+        last_direction      := -1
+        last_setup_name     := "LIQ"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+// --- VWAP Entries ---
+vwap_long  = vwap_reclaim_long or vwap_reject_long
+vwap_short = vwap_reclaim_short or vwap_reject_short
+
+if vwap_long and can_trade and not orb_long_signal and not liq_sweep_long
+    at_vwap = math.abs(close - vwap_val) / close * 100 < 0.3
+    grade = f_grade_setup(true, bias >= 0, at_vwap, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1
+        strategy.entry("VWAP Long", strategy.long)
+        strategy.exit("VWAP L Exit", "VWAP Long", stop=vwap_stop, limit=vwap_tp)
+        last_entry_price    := close
+        last_stop_price     := vwap_stop
+        last_tp_price       := vwap_tp
+        last_direction      := 1
+        last_setup_name     := "VWAP"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+if vwap_short and can_trade and not orb_short_signal and not liq_sweep_short
+    at_vwap = math.abs(close - vwap_val) / close * 100 < 0.3
+    grade = f_grade_setup(false, bias <= 0, at_vwap, body_pct > 50, above_avg_vol, is_prime_window)
+    if grade >= 1
+        strategy.entry("VWAP Short", strategy.short)
+        strategy.exit("VWAP S Exit", "VWAP Short", stop=vwap_stop, limit=vwap_tp)
+        last_entry_price    := close
+        last_stop_price     := vwap_stop
+        last_tp_price       := vwap_tp
+        last_direction      := -1
+        last_setup_name     := "VWAP"
+        session_trade_count := session_trade_count + 1
+        bars_since_trade    := 0
+
+// --- Close all at session end ---
+if not is_ny_session and is_ny_session[1]
+    strategy.close_all(comment="Session End")
+
+// --- Track consecutive losses for kill switch ---
+if strategy.closedtrades > 0
+    last_trade_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if ta.change(strategy.closedtrades) > 0
+        if last_trade_profit < 0
+            consec_losses := consec_losses + 1
+            if consec_losses >= max_consec_loss
+                kill_switch_active := true
+        else
+            consec_losses := 0
+
+// ============================================================================
+// VISUALS
+// ============================================================================
+
+// --- Opening Range Box ---
+or_color = color.new(color.blue, 85)
+plot(show_or and or_formed ? or_high : na, "OR High", color=color.new(color.blue, 30), style=plot.style_linebr, linewidth=2)
+plot(show_or and or_formed ? or_low  : na, "OR Low",  color=color.new(color.blue, 30), style=plot.style_linebr, linewidth=2)
+
+// --- VWAP ---
+plot(show_vwap ? vwap_val : na, "VWAP", color=color.new(color.orange, 0), linewidth=2)
+
+// --- PDH/PDL ---
+plot(show_liq_levels and not na(pdh) ? pdh : na, "PDH", color=color.new(color.red, 40), style=plot.style_circles, linewidth=1)
+plot(show_liq_levels and not na(pdl) ? pdl : na, "PDL", color=color.new(color.green, 40), style=plot.style_circles, linewidth=1)
+
+// --- Entry Signals ---
+// ORB
+plotshape(show_signals and orb_long_signal  ? low  - atr_val * 0.3 : na, "ORB Long",  shape.triangleup,   location.absolute, color.new(color.green, 0), size=size.small)
+plotshape(show_signals and orb_short_signal ? high + atr_val * 0.3 : na, "ORB Short", shape.triangledown, location.absolute, color.new(color.red, 0),   size=size.small)
+
+// VWAP
+plotshape(show_signals and vwap_long  ? low  - atr_val * 0.5 : na, "VWAP Long",  shape.circle, location.absolute, color.new(color.lime, 0),   size=size.small)
+plotshape(show_signals and vwap_short ? high + atr_val * 0.5 : na, "VWAP Short", shape.circle, location.absolute, color.new(color.fuchsia, 0), size=size.small)
+
+// Liquidity Sweep
+plotshape(show_signals and liq_sweep_long  ? low  - atr_val * 0.7 : na, "Liq Long",  shape.diamond, location.absolute, color.new(color.teal, 0),   size=size.small)
+plotshape(show_signals and liq_sweep_short ? high + atr_val * 0.7 : na, "Liq Short", shape.diamond, location.absolute, color.new(color.maroon, 0), size=size.small)
+
+// --- Session Background ---
+bgcolor(is_ny_session ? color.new(color.blue, 95) : na, title="NY Session")
+bgcolor(is_first_5_min ? color.new(color.red, 90) : na, title="No Trade Zone (First 5 Min)")
+bgcolor(kill_switch_active and is_ny_session ? color.new(color.red, 85) : na, title="Kill Switch Active")
+
+// --- Bias Bar Color ---
+barcolor(bias == 1 ? color.new(color.green, 60) : bias == -1 ? color.new(color.red, 60) : na, title="Bias Color")
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+if show_dashboard
+    var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+
+    bias_txt  = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+    bias_clr  = bias == 1 ? color.green : bias == -1 ? color.red : color.gray
+    kill_txt  = kill_switch_active ? "ACTIVE — STOP" : "OK"
+    kill_clr  = kill_switch_active ? color.red : color.green
+    window_txt = is_first_5_min ? "NO TRADE ZONE" : is_prime_window ? "PRIME WINDOW" : is_late_window ? "LATE (A+ ONLY)" : "OFF SESSION"
+    window_clr = is_first_5_min ? color.red : is_prime_window ? color.green : is_late_window ? color.yellow : color.gray
+
+    table.cell(dash, 0, 0, "NY AM SCALPER", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, "v1.0",          text_color=color.gray,  text_size=size.small)
+
+    table.cell(dash, 0, 1, "Bias",           text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 1, bias_txt,         text_color=bias_clr,   text_size=size.small)
+
+    table.cell(dash, 0, 2, "Window",         text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 2, window_txt,       text_color=window_clr, text_size=size.small)
+
+    table.cell(dash, 0, 3, "Trades",         text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(session_trade_count) + " / " + str.tostring(max_trades_session), text_color=session_trade_count >= max_trades_session ? color.red : color.white, text_size=size.small)
+
+    table.cell(dash, 0, 4, "Consec Loss",    text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(consec_losses) + " / " + str.tostring(max_consec_loss), text_color=consec_losses >= max_consec_loss ? color.red : color.yellow, text_size=size.small)
+
+    table.cell(dash, 0, 5, "Kill Switch",    text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 5, kill_txt,         text_color=kill_clr,   text_size=size.small)
+
+    table.cell(dash, 0, 6, "Last Setup",     text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 6, last_setup_name == "" ? "—" : last_setup_name, text_color=color.white, text_size=size.small)
+
+    table.cell(dash, 0, 7, "OR Range",       text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 7, or_formed ? str.tostring(or_width, format.mintick) : "Forming...", text_color=or_formed ? (or_too_wide ? color.red : color.green) : color.yellow, text_size=size.small)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(orb_long_signal,     "ORB Long Entry",          "ORB LONG — Price broke above Opening Range")
+alertcondition(orb_short_signal,    "ORB Short Entry",         "ORB SHORT — Price broke below Opening Range")
+alertcondition(vwap_reclaim_long,   "VWAP Reclaim Long",       "VWAP RECLAIM LONG — Price reclaimed VWAP from below")
+alertcondition(vwap_reclaim_short,  "VWAP Reclaim Short",      "VWAP RECLAIM SHORT — Price reclaimed VWAP from above")
+alertcondition(vwap_reject_long,    "VWAP Rejection Long",     "VWAP REJECTION LONG — Bullish rejection at VWAP")
+alertcondition(vwap_reject_short,   "VWAP Rejection Short",    "VWAP REJECTION SHORT — Bearish rejection at VWAP")
+alertcondition(liq_sweep_long,      "Liquidity Sweep Long",    "LIQUIDITY SWEEP LONG — Sweep of lows + bullish reversal")
+alertcondition(liq_sweep_short,     "Liquidity Sweep Short",   "LIQUIDITY SWEEP SHORT — Sweep of highs + bearish reversal")
+alertcondition(kill_switch_active,  "Kill Switch Activated",   "KILL SWITCH — Max consecutive losses reached. Stop trading.")
+alertcondition(session_trade_count >= max_trades_session, "Max Trades Reached", "MAX TRADES — Session trade limit reached. No more entries.")
