@@ -1,0 +1,594 @@
+//@version=6
+strategy(
+     title             = "VWAP + ORB Session Strategy v1.0",
+     shorttitle        = "VWAP-ORB v1.0",
+     overlay           = true,
+     pyramiding        = 0,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true)
+
+// ===========================================================
+// HELPER FUNCTIONS
+// ===========================================================
+
+fmtP(float v) =>
+    str.tostring(math.round(v, 2))
+
+fmtBool(bool b) =>
+    b ? "✓" : "✗"
+
+fmtGrade(int score) =>
+    score >= 5 ? "A+" : score == 4 ? "A" : score == 3 ? "B+" : "C+"
+
+// ===========================================================
+// INPUTS — SESSION TIMES
+// ===========================================================
+
+grpSes = "Session Settings"
+i_asiaStart   = input.int(1900, "Asia Start (HHMM EST)",   group = grpSes, tooltip = "Default 7:00 PM EST")
+i_asiaEnd     = input.int(0,    "Asia End (HHMM EST)",     group = grpSes, tooltip = "Default 12:00 AM EST (midnight = 0)")
+i_londonStart = input.int(300,  "London Start (HHMM EST)", group = grpSes, tooltip = "Default 3:00 AM EST")
+i_londonEnd   = input.int(800,  "London End (HHMM EST)",   group = grpSes, tooltip = "Default 8:00 AM EST")
+i_nyStart     = input.int(930,  "NY Start (HHMM EST)",     group = grpSes, tooltip = "Default 9:30 AM EST")
+i_nyEnd       = input.int(1200, "NY End (HHMM EST)",       group = grpSes, tooltip = "Default 12:00 PM EST")
+
+i_showSessBG  = input.bool(true, "Shade Session Background", group = grpSes)
+i_asiaCol     = input.color(color.new(color.purple, 92), "Asia Color",   group = grpSes)
+i_londonCol   = input.color(color.new(color.blue, 92),   "London Color", group = grpSes)
+i_nyCol       = input.color(color.new(color.orange, 92), "NY Color",     group = grpSes)
+
+// ===========================================================
+// INPUTS — OPENING RANGE
+// ===========================================================
+
+grpORB = "Opening Range"
+i_orbMinutes  = input.int(15, "ORB Duration (minutes)", options = [5, 15, 30], group = grpORB)
+i_showORBBox  = input.bool(true, "Show ORB Box", group = grpORB)
+i_orbBoxCol   = input.color(color.new(color.teal, 85), "ORB Box Color", group = grpORB)
+
+// ===========================================================
+// INPUTS — HTF BIAS
+// ===========================================================
+
+grpHTF = "Higher Timeframe Bias"
+i_htfLen1     = input.int(12, "1H Structure Lookback",  minval = 3, maxval = 50, group = grpHTF)
+i_htfLen4     = input.int(12, "4H Structure Lookback",  minval = 3, maxval = 50, group = grpHTF)
+
+// ===========================================================
+// INPUTS — VOLUME & TRADE MANAGEMENT
+// ===========================================================
+
+grpVol = "Volume"
+i_volLen      = input.int(20, "Volume MA Length", minval = 5, maxval = 100, group = grpVol)
+
+grpTrade = "Trade Management"
+i_maxTrades   = input.int(2, "Max Trades Per Session", minval = 1, maxval = 5, group = grpTrade)
+i_swingLen    = input.int(10, "Swing Point Lookback",  minval = 3, maxval = 30, group = grpTrade)
+
+grpVis = "Visuals"
+i_showDash    = input.bool(true, "Show Dashboard",     group = grpVis)
+i_showTPLines = input.bool(true, "Show TP/SL Lines",   group = grpVis)
+i_dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpVis)
+
+// ===========================================================
+// TIME UTILITIES
+// ===========================================================
+
+estHour   = hour(time, "America/New_York")
+estMinute = minute(time, "America/New_York")
+estHHMM   = estHour * 100 + estMinute
+
+inSessionRaw(int startHHMM, int endHHMM) =>
+    if startHHMM > endHHMM
+        estHHMM >= startHHMM or estHHMM < endHHMM
+    else
+        estHHMM >= startHHMM and estHHMM < endHHMM
+
+inAsia   = inSessionRaw(i_asiaStart, i_asiaEnd)
+inLondon = inSessionRaw(i_londonStart, i_londonEnd)
+inNY     = inSessionRaw(i_nyStart, i_nyEnd)
+
+inAnySession = inAsia or inLondon or inNY
+
+sessionName = inNY ? "New York" : inLondon ? "London" : inAsia ? "Asia" : "Off-Hours"
+
+sessionStartHHMM = inNY ? i_nyStart : inLondon ? i_londonStart : inAsia ? i_asiaStart : 0
+
+// Session background
+bgcolor(i_showSessBG and inAsia   ? i_asiaCol   : na)
+bgcolor(i_showSessBG and inLondon ? i_londonCol : na)
+bgcolor(i_showSessBG and inNY     ? i_nyCol     : na)
+
+// ===========================================================
+// SESSION DETECTION — new session start
+// ===========================================================
+
+wasInAsia   = inSessionRaw(i_asiaStart, i_asiaEnd)[1]
+wasInLondon = inSessionRaw(i_londonStart, i_londonEnd)[1]
+wasInNY     = inSessionRaw(i_nyStart, i_nyEnd)[1]
+
+newAsiaSession   = inAsia   and not wasInAsia
+newLondonSession = inLondon and not wasInLondon
+newNYSession     = inNY     and not wasInNY
+newSession       = newAsiaSession or newLondonSession or newNYSession
+
+// ===========================================================
+// OPENING RANGE CALCULATION
+// ===========================================================
+
+orbBarsNeeded = i_orbMinutes / timeframe.in_seconds() * 60
+
+var float orbHigh     = na
+var float orbLow      = na
+var int   orbBarsIn   = 0
+var bool  orbComplete = false
+var int   orbStartBar = na
+
+if newSession
+    orbHigh     := high
+    orbLow      := low
+    orbBarsIn   := 1
+    orbComplete := false
+    orbStartBar := bar_index
+else if not orbComplete and inAnySession and orbBarsIn > 0
+    orbHigh   := math.max(orbHigh, high)
+    orbLow    := math.min(orbLow, low)
+    orbBarsIn += 1
+    if orbBarsIn >= orbBarsNeeded
+        orbComplete := true
+
+plot(orbComplete and inAnySession ? orbHigh : na, "ORB High", color.new(color.teal, 30), 2, plot.style_linebr)
+plot(orbComplete and inAnySession ? orbLow  : na, "ORB Low",  color.new(color.teal, 30), 2, plot.style_linebr)
+
+// ORB Box
+var box orbBox = na
+
+if orbComplete and orbBarsIn == orbBarsNeeded and i_showORBBox
+    if not na(orbBox)
+        box.delete(orbBox)
+    orbBox := box.new(orbStartBar, orbHigh, bar_index + 20, orbLow,
+         border_color = color.new(color.teal, 40),
+         bgcolor      = i_orbBoxCol,
+         border_width  = 1,
+         extend       = extend.right)
+
+if newSession and not na(orbBox)
+    box.set_extend(orbBox, extend.none)
+    box.set_right(orbBox, bar_index)
+
+// ===========================================================
+// SESSION VWAP
+// ===========================================================
+
+var float vwapSum      = 0.0
+var float vwapVolSum   = 0.0
+var float sessionVWAP  = na
+var float prevVWAP     = na
+
+typicalPrice = (high + low + close) / 3.0
+
+if newSession
+    prevVWAP   := na
+    vwapSum    := typicalPrice * volume
+    vwapVolSum := volume
+    sessionVWAP := typicalPrice
+else if inAnySession
+    vwapSum    += typicalPrice * volume
+    vwapVolSum += volume
+    prevVWAP   := sessionVWAP
+    sessionVWAP := vwapVolSum > 0 ? vwapSum / vwapVolSum : typicalPrice
+
+vwapSlope    = not na(prevVWAP) and not na(sessionVWAP) ? sessionVWAP - prevVWAP : 0.0
+vwapBullish  = inAnySession and close > sessionVWAP and vwapSlope > 0
+vwapBearish  = inAnySession and close < sessionVWAP and vwapSlope < 0
+
+vwapColor = vwapBullish ? color.green : vwapBearish ? color.red : color.gray
+plot(inAnySession ? sessionVWAP : na, "Session VWAP", vwapColor, 2, plot.style_linebr)
+
+// ===========================================================
+// HIGHER TIMEFRAME BIAS (1H & 4H structure)
+// ===========================================================
+
+[h1High, h1Low, h1Close] = request.security(syminfo.tickerid, "60",  [high, low, close], lookahead = barmerge.lookahead_off)
+[h4High, h4Low, h4Close] = request.security(syminfo.tickerid, "240", [high, low, close], lookahead = barmerge.lookahead_off)
+
+pivotHigh1H = ta.pivothigh(h1High, i_htfLen1, i_htfLen1)
+pivotLow1H  = ta.pivotlow(h1Low,   i_htfLen1, i_htfLen1)
+pivotHigh4H = ta.pivothigh(h4High, i_htfLen4, i_htfLen4)
+pivotLow4H  = ta.pivotlow(h4Low,   i_htfLen4, i_htfLen4)
+
+var float lastPH_1H = na
+var float prevPH_1H = na
+var float lastPL_1H = na
+var float prevPL_1H = na
+
+if not na(pivotHigh1H)
+    prevPH_1H := lastPH_1H
+    lastPH_1H := pivotHigh1H
+if not na(pivotLow1H)
+    prevPL_1H := lastPL_1H
+    lastPL_1H := pivotLow1H
+
+var float lastPH_4H = na
+var float prevPH_4H = na
+var float lastPL_4H = na
+var float prevPL_4H = na
+
+if not na(pivotHigh4H)
+    prevPH_4H := lastPH_4H
+    lastPH_4H := pivotHigh4H
+if not na(pivotLow4H)
+    prevPL_4H := lastPL_4H
+    lastPL_4H := pivotLow4H
+
+bullish1H = not na(prevPH_1H) and not na(prevPL_1H) and lastPH_1H > prevPH_1H and lastPL_1H > prevPL_1H
+bearish1H = not na(prevPH_1H) and not na(prevPL_1H) and lastPH_1H < prevPH_1H and lastPL_1H < prevPL_1H
+
+bullish4H = not na(prevPH_4H) and not na(prevPL_4H) and lastPH_4H > prevPH_4H and lastPL_4H > prevPL_4H
+bearish4H = not na(prevPH_4H) and not na(prevPL_4H) and lastPH_4H < prevPH_4H and lastPL_4H < prevPL_4H
+
+htfBullish = bullish1H and bullish4H
+htfBearish = bearish1H and bearish4H
+
+htfBiasStr = htfBullish ? "Bullish" : htfBearish ? "Bearish" : "Neutral"
+
+// ===========================================================
+// VOLUME CONFIRMATION
+// ===========================================================
+
+volMA        = ta.sma(volume, i_volLen)
+volExpansion = volume > volMA
+
+// ===========================================================
+// SWING POINTS FOR STOP LOSS
+// ===========================================================
+
+swingLow  = ta.lowest(low,  i_swingLen)
+swingHigh = ta.highest(high, i_swingLen)
+
+// ===========================================================
+// RESISTANCE / SUPPORT PROXIMITY CHECK (for A+ grading)
+// ===========================================================
+
+atr14         = ta.atr(14)
+nearResistance = not na(lastPH_1H) and math.abs(close - lastPH_1H) < atr14 * 1.5
+nearSupport    = not na(lastPL_1H) and math.abs(close - lastPL_1H) < atr14 * 1.5
+
+// ===========================================================
+// TRADE STATE
+// ===========================================================
+
+var int   sessionTradeCount = 0
+var bool  longTriggered     = false
+var bool  shortTriggered    = false
+var float entryPrice        = na
+var float stopPrice         = na
+var float tp1Price          = na
+var float tp2Price          = na
+var float tp3Price          = na
+var bool  tp1Hit            = false
+var bool  tp2Hit            = false
+var bool  tp3Hit            = false
+var int   tradeDir          = 0
+var int   lastGrade         = 0
+var string lastGradeStr     = ""
+
+if newSession
+    sessionTradeCount := 0
+    longTriggered     := false
+    shortTriggered    := false
+    entryPrice        := na
+    stopPrice         := na
+    tp1Price          := na
+    tp2Price          := na
+    tp3Price          := na
+    tp1Hit            := false
+    tp2Hit            := false
+    tp3Hit            := false
+    tradeDir          := 0
+
+// ===========================================================
+// ENTRY CONDITIONS
+// ===========================================================
+
+canTrade = inAnySession and orbComplete and sessionTradeCount < i_maxTrades and not tp3Hit
+
+orbBreakUp   = close > orbHigh and close[1] <= orbHigh
+orbBreakDown = close < orbLow  and close[1] >= orbLow
+
+longCondition  = canTrade and not longTriggered  and htfBullish and vwapBullish and orbBreakUp   and volExpansion
+shortCondition = canTrade and not shortTriggered and htfBearish and vwapBearish and orbBreakDown and volExpansion
+
+// ===========================================================
+// SETUP GRADING
+// ===========================================================
+
+gradeLong() =>
+    int score = 0
+    if htfBullish
+        score += 1
+    if vwapBullish
+        score += 1
+    if orbBreakUp
+        score += 1
+    if volExpansion
+        score += 1
+    if not nearResistance
+        score += 1
+    score
+
+gradeShort() =>
+    int score = 0
+    if htfBearish
+        score += 1
+    if vwapBearish
+        score += 1
+    if orbBreakDown
+        score += 1
+    if volExpansion
+        score += 1
+    if not nearSupport
+        score += 1
+    score
+
+// ===========================================================
+// EXECUTE ENTRIES
+// ===========================================================
+
+if longCondition
+    float sl = math.min(orbLow, swingLow)
+    float risk = close - sl
+    if risk > 0
+        entryPrice := close
+        stopPrice  := sl
+        tp1Price   := close + risk
+        tp2Price   := close + risk * 2
+        tp3Price   := close + risk * 3
+        tp1Hit     := false
+        tp2Hit     := false
+        tp3Hit     := false
+        tradeDir   := 1
+        longTriggered     := true
+        sessionTradeCount += 1
+        lastGrade  := gradeLong()
+        lastGradeStr := fmtGrade(lastGrade)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long TP/SL", "Long", stop = sl, limit = close + risk * 3)
+
+if shortCondition
+    float sl = math.max(orbHigh, swingHigh)
+    float risk = sl - close
+    if risk > 0
+        entryPrice := close
+        stopPrice  := sl
+        tp1Price   := close - risk
+        tp2Price   := close - risk * 2
+        tp3Price   := close - risk * 3
+        tp1Hit     := false
+        tp2Hit     := false
+        tp3Hit     := false
+        tradeDir   := -1
+        shortTriggered    := true
+        sessionTradeCount += 1
+        lastGrade  := gradeShort()
+        lastGradeStr := fmtGrade(lastGrade)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short TP/SL", "Short", stop = sl, limit = close - risk * 3)
+
+// ===========================================================
+// TP TRACKING
+// ===========================================================
+
+if tradeDir == 1 and not na(entryPrice)
+    if not tp1Hit and high >= tp1Price
+        tp1Hit := true
+    if not tp2Hit and high >= tp2Price
+        tp2Hit := true
+    if not tp3Hit and high >= tp3Price
+        tp3Hit := true
+
+if tradeDir == -1 and not na(entryPrice)
+    if not tp1Hit and low <= tp1Price
+        tp1Hit := true
+    if not tp2Hit and low <= tp2Price
+        tp2Hit := true
+    if not tp3Hit and low <= tp3Price
+        tp3Hit := true
+
+// Current RR
+currentRR = 0.0
+if not na(entryPrice) and not na(stopPrice) and tradeDir != 0
+    float risk = math.abs(entryPrice - stopPrice)
+    if risk > 0
+        if tradeDir == 1
+            currentRR := (close - entryPrice) / risk
+        else
+            currentRR := (entryPrice - close) / risk
+
+// ===========================================================
+// ENTRY LABELS & REASON LABELS
+// ===========================================================
+
+if longCondition and not na(entryPrice) and entryPrice == close
+    string reasons = "✓ Bullish HTF\n✓ Above VWAP\n✓ ORB Breakout\n✓ Volume Confirmation"
+    label.new(bar_index, low, "🟢 LONG ENTRY\n" + lastGradeStr + "\n" + reasons,
+         color     = color.new(color.green, 20),
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.large,
+         xloc      = xloc.bar_index)
+
+if shortCondition and not na(entryPrice) and entryPrice == close
+    string reasons = "✓ Bearish HTF\n✓ Below VWAP\n✓ ORB Breakdown\n✓ Volume Confirmation"
+    label.new(bar_index, high, "🔴 SHORT ENTRY\n" + lastGradeStr + "\n" + reasons,
+         color     = color.new(color.red, 20),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.large,
+         xloc      = xloc.bar_index)
+
+// ===========================================================
+// TP HIT LABELS
+// ===========================================================
+
+if tp1Hit and not tp1Hit[1]
+    label.new(bar_index, tradeDir == 1 ? high : low,
+         "TP1 ✓",
+         color     = color.new(color.green, 30),
+         textcolor = color.white,
+         style     = tradeDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.small)
+
+if tp2Hit and not tp2Hit[1]
+    label.new(bar_index, tradeDir == 1 ? high : low,
+         "TP2 ✓",
+         color     = color.new(color.green, 20),
+         textcolor = color.white,
+         style     = tradeDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.small)
+
+if tp3Hit and not tp3Hit[1]
+    label.new(bar_index, tradeDir == 1 ? high : low,
+         "TP3 ✓",
+         color     = color.new(color.lime, 10),
+         textcolor = color.white,
+         style     = tradeDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.normal)
+
+// ===========================================================
+// DRAW TP / SL LINES
+// ===========================================================
+
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
+var label slLbl  = na
+var label tp1Lbl = na
+var label tp2Lbl = na
+var label tp3Lbl = na
+
+if (longCondition or shortCondition) and i_showTPLines and not na(entryPrice)
+    if not na(slLine)
+        line.delete(slLine)
+        line.delete(tp1Line)
+        line.delete(tp2Line)
+        line.delete(tp3Line)
+        label.delete(slLbl)
+        label.delete(tp1Lbl)
+        label.delete(tp2Lbl)
+        label.delete(tp3Lbl)
+
+    int ext = bar_index + 50
+
+    slLine  := line.new(bar_index, stopPrice, ext, stopPrice, color = color.red,   style = line.style_dashed, width = 2)
+    tp1Line := line.new(bar_index, tp1Price,  ext, tp1Price,  color = color.green, style = line.style_dashed, width = 1)
+    tp2Line := line.new(bar_index, tp2Price,  ext, tp2Price,  color = color.green, style = line.style_dashed, width = 1)
+    tp3Line := line.new(bar_index, tp3Price,  ext, tp3Price,  color = color.lime,  style = line.style_dashed, width = 2)
+
+    slLbl   := label.new(ext, stopPrice, "STOP LOSS\n" + fmtP(stopPrice), color = color.new(color.red, 30),   textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp1Lbl  := label.new(ext, tp1Price,  "TP1 (1R)\n"  + fmtP(tp1Price),  color = color.new(color.green, 40), textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp2Lbl  := label.new(ext, tp2Price,  "TP2 (2R)\n"  + fmtP(tp2Price),  color = color.new(color.green, 30), textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp3Lbl  := label.new(ext, tp3Price,  "TP3 (3R)\n"  + fmtP(tp3Price),  color = color.new(color.lime, 20),  textcolor = color.white, style = label.style_label_left, size = size.small)
+
+// ===========================================================
+// PERFORMANCE TRACKING
+// ===========================================================
+
+var int   totalTrades = 0
+var int   wins        = 0
+var float todayPnL    = 0.0
+
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    todayPnL := 0.0
+
+if strategy.closedtrades > 0
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if strategy.closedtrades > totalTrades
+        totalTrades := strategy.closedtrades
+        todayPnL   += lastTradeProfit
+        if lastTradeProfit > 0
+            wins += 1
+
+winRate = totalTrades > 0 ? (wins / totalTrades) * 100.0 : 0.0
+
+// ===========================================================
+// DASHBOARD TABLE
+// ===========================================================
+
+if i_showDash and barstate.islast
+    var table dash = na
+    tblPos = switch i_dashPos
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.top_right
+
+    dash := table.new(tblPos, 2, 12, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 60))
+
+    table.cell(dash, 0, 0, "VWAP + ORB Strategy", text_color = color.white, text_size = size.normal, bgcolor = color.new(color.blue, 30))
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    table.cell(dash, 0, 1, "Session",      text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 1, sessionName,     text_color = inAnySession ? color.lime : color.gray, text_size = size.small)
+
+    table.cell(dash, 0, 2, "HTF Bias",     text_color = color.silver, text_size = size.small)
+    htfCol = htfBullish ? color.green : htfBearish ? color.red : color.gray
+    table.cell(dash, 1, 2, htfBiasStr,     text_color = htfCol, text_size = size.small)
+
+    vwapStatusStr = vwapBullish ? "Bullish" : vwapBearish ? "Bearish" : "Neutral"
+    table.cell(dash, 0, 3, "VWAP Status",  text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 3, vwapStatusStr,   text_color = vwapBullish ? color.green : vwapBearish ? color.red : color.gray, text_size = size.small)
+
+    orbStatusStr = orbComplete ? "Ready" : inAnySession ? "Building (" + str.tostring(orbBarsIn) + ")" : "Inactive"
+    table.cell(dash, 0, 4, "ORB Status",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 4, orbStatusStr,    text_color = orbComplete ? color.lime : color.yellow, text_size = size.small)
+
+    table.cell(dash, 0, 5, "Setup Grade",  text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 5, lastGradeStr != "" ? lastGradeStr : "—", text_color = color.white, text_size = size.small)
+
+    table.cell(dash, 0, 6, "Trades Taken", text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 6, str.tostring(sessionTradeCount) + " / " + str.tostring(i_maxTrades), text_color = color.white, text_size = size.small)
+
+    table.cell(dash, 0, 7, "Win Rate",     text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 7, fmtP(winRate) + "%", text_color = winRate >= 50 ? color.green : color.red, text_size = size.small)
+
+    table.cell(dash, 0, 8, "Today P&L",    text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 8, "$" + fmtP(todayPnL), text_color = todayPnL >= 0 ? color.green : color.red, text_size = size.small)
+
+    table.cell(dash, 0, 9, "Current RR",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 9, tradeDir != 0 ? fmtP(currentRR) + "R" : "—", text_color = currentRR >= 0 ? color.green : color.red, text_size = size.small)
+
+    tpStr = ""
+    if tp1Hit
+        tpStr += "TP1✓ "
+    if tp2Hit
+        tpStr += "TP2✓ "
+    if tp3Hit
+        tpStr += "TP3✓"
+    table.cell(dash, 0, 10, "TP Status",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 10, tpStr != "" ? tpStr : "—", text_color = color.lime, text_size = size.small)
+
+    rrStr = ""
+    if not na(orbHigh) and not na(orbLow) and orbComplete
+        rrStr := "H:" + fmtP(orbHigh) + " L:" + fmtP(orbLow)
+    table.cell(dash, 0, 11, "ORB Range",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 11, rrStr != "" ? rrStr : "—", text_color = color.teal, text_size = size.small)
+
+// ===========================================================
+// ALERTS
+// ===========================================================
+
+alertcondition(longCondition,  title = "LONG Entry",  message = "🟢 LONG ENTRY — VWAP+ORB Breakout confirmed")
+alertcondition(shortCondition, title = "SHORT Entry", message = "🔴 SHORT ENTRY — VWAP+ORB Breakdown confirmed")
+alertcondition(tp1Hit and not tp1Hit[1], title = "TP1 Hit", message = "TP1 (1R) achieved")
+alertcondition(tp2Hit and not tp2Hit[1], title = "TP2 Hit", message = "TP2 (2R) achieved")
+alertcondition(tp3Hit and not tp3Hit[1], title = "TP3 Hit", message = "TP3 (3R) achieved")
