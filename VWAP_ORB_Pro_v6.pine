@@ -1,0 +1,895 @@
+//@version=6
+strategy(
+     title             = "VWAP ORB Pro - Continuation and Reversal",
+     shorttitle        = "VWAP-ORB",
+     overlay           = true,
+     pyramiding        = 0,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 100000,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,
+     slippage          = 2,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true,
+     max_boxes_count         = 500,
+     max_lines_count         = 500,
+     max_labels_count        = 500)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  HELPER FUNCTIONS                                        ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+fmtP(float v) =>
+    str.tostring(math.round(v, 2))
+
+fmtGrade(int score) =>
+    score >= 90 ? "A+" : score >= 80 ? "A" : score >= 70 ? "B+" : score >= 60 ? "B" : score >= 50 ? "C+" : "—"
+
+gradeColor(int score) =>
+    score >= 90 ? color.lime : score >= 80 ? color.green : score >= 70 ? color.yellow : score >= 60 ? color.orange : color.gray
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  INPUTS — SESSIONS                                       ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+grpSes      = "Session Settings"
+i_asiaStart = input.int(1900, "Asia Start (HHMM EST)",   group = grpSes)
+i_asiaEnd   = input.int(0,    "Asia End (HHMM EST)",     group = grpSes)
+i_ldnStart  = input.int(300,  "London Start (HHMM EST)", group = grpSes)
+i_ldnEnd    = input.int(800,  "London End (HHMM EST)",   group = grpSes)
+i_nyStart   = input.int(930,  "NY Start (HHMM EST)",     group = grpSes)
+i_nyEnd     = input.int(1200, "NY End (HHMM EST)",       group = grpSes)
+i_showSBG   = input.bool(true, "Shade Session BG",       group = grpSes)
+i_asiaC     = input.color(color.new(color.purple, 92), "Asia BG",   group = grpSes)
+i_ldnC      = input.color(color.new(color.blue, 92),   "London BG", group = grpSes)
+i_nyC       = input.color(color.new(color.orange, 92), "NY BG",     group = grpSes)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  INPUTS — ORB                                            ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+grpORB       = "Opening Range"
+i_orbMin     = input.int(15, "ORB Period (min)", options = [15, 30, 60], group = grpORB)
+i_showORB    = input.bool(true,  "Show ORB Boxes",  group = grpORB)
+i_orbBullC   = input.color(color.new(color.teal, 85),  "ORB Box Color", group = grpORB)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  INPUTS — STRUCTURE / VOLUME / TRADE                     ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+grpStruct    = "Market Structure"
+i_structLen  = input.int(10, "Structure Pivot Len",  minval = 3, maxval = 30, group = grpStruct)
+i_htfLen1H   = input.int(10, "1H Pivot Lookback",   minval = 3, maxval = 50, group = grpStruct)
+i_htfLen4H   = input.int(10, "4H Pivot Lookback",   minval = 3, maxval = 50, group = grpStruct)
+
+grpVol       = "Volume"
+i_volLen     = input.int(20, "Volume MA Length",     minval = 5, maxval = 100, group = grpVol)
+i_volMult    = input.float(1.5, "Volume Expansion X", minval = 1.0, step = 0.1, group = grpVol)
+
+grpTrade     = "Trade Management"
+i_maxTrades  = input.int(2, "Max Trades / Session",  minval = 1, maxval = 5,  group = grpTrade)
+i_swingLen   = input.int(10, "Swing Lookback",       minval = 3, maxval = 30, group = grpTrade)
+i_retestBars = input.int(5,  "Retest Window (bars)", minval = 2, maxval = 15, group = grpTrade)
+i_sweepATR   = input.float(0.3, "Sweep Min ATR",     minval = 0.1, step = 0.1, group = grpTrade)
+i_liqLook    = input.int(50, "Liquidity Target Bars", minval = 10, maxval = 200, group = grpTrade)
+
+grpVis       = "Visuals"
+i_showDash   = input.bool(true, "Show Dashboard",    group = grpVis)
+i_showTP     = input.bool(true, "Show TP/SL Lines",  group = grpVis)
+i_dashPos    = input.string("Top Right", "Dashboard", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpVis)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  TIME ENGINE                                             ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+estH    = hour(time, "America/New_York")
+estM    = minute(time, "America/New_York")
+estHHMM = estH * 100 + estM
+
+inSesRaw(int s, int e) =>
+    if s > e
+        estHHMM >= s or estHHMM < e
+    else
+        estHHMM >= s and estHHMM < e
+
+inAsia   = inSesRaw(i_asiaStart, i_asiaEnd)
+inLdn    = inSesRaw(i_ldnStart, i_ldnEnd)
+inNY     = inSesRaw(i_nyStart, i_nyEnd)
+inAnySes = inAsia or inLdn or inNY
+
+sesName  = inNY ? "New York" : inLdn ? "London" : inAsia ? "Asia" : "Off"
+
+bgcolor(i_showSBG and inAsia ? i_asiaC : na)
+bgcolor(i_showSBG and inLdn  ? i_ldnC  : na)
+bgcolor(i_showSBG and inNY   ? i_nyC   : na)
+
+// Session transitions
+wasAsia = inSesRaw(i_asiaStart, i_asiaEnd)[1]
+wasLdn  = inSesRaw(i_ldnStart, i_ldnEnd)[1]
+wasNY   = inSesRaw(i_nyStart, i_nyEnd)[1]
+
+newAsia = inAsia and not wasAsia
+newLdn  = inLdn  and not wasLdn
+newNY   = inNY   and not wasNY
+newSes  = newAsia or newLdn or newNY
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  SESSION HIGH / LOW TRACKING                             ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+var float sesHi = na
+var float sesLo = na
+
+if newSes
+    sesHi := high
+    sesLo := low
+else if inAnySes
+    sesHi := math.max(nz(sesHi, high), high)
+    sesLo := math.min(nz(sesLo, low), low)
+
+plot(inAnySes ? sesHi : na, "Session High", color.new(color.silver, 50), 1, plot.style_linebr)
+plot(inAnySes ? sesLo : na, "Session Low",  color.new(color.silver, 50), 1, plot.style_linebr)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  OPENING RANGE                                           ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+orbBarsNeeded = i_orbMin / (timeframe.in_seconds() / 60)
+
+var float orbHi       = na
+var float orbLo       = na
+var int   orbCount    = 0
+var bool  orbDone     = false
+var int   orbStartBar = na
+
+if newSes
+    orbHi       := high
+    orbLo       := low
+    orbCount    := 1
+    orbDone     := false
+    orbStartBar := bar_index
+else if not orbDone and inAnySes and orbCount > 0
+    orbHi    := math.max(orbHi, high)
+    orbLo    := math.min(orbLo, low)
+    orbCount += 1
+    if orbCount >= orbBarsNeeded
+        orbDone := true
+
+plot(orbDone and inAnySes ? orbHi : na, "ORB High", color.new(color.teal, 20), 2, plot.style_linebr)
+plot(orbDone and inAnySes ? orbLo : na, "ORB Low",  color.new(color.teal, 20), 2, plot.style_linebr)
+
+// ORB Box drawing
+var box orbBox = na
+
+if newSes and not na(orbBox)
+    box.set_extend(orbBox, extend.none)
+    box.set_right(orbBox, bar_index)
+
+if orbDone and orbCount == orbBarsNeeded and i_showORB
+    if not na(orbBox)
+        box.delete(orbBox)
+    orbBox := box.new(orbStartBar, orbHi, bar_index + 30, orbLo,
+         border_color = color.new(color.teal, 30),
+         bgcolor      = i_orbBullC,
+         border_width = 1,
+         extend       = extend.right)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  DAILY VWAP                                              ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+isNewDay     = ta.change(time("D")) != 0
+typPrice     = (high + low + close) / 3.0
+
+var float dVwapSum    = 0.0
+var float dVwapVolSum = 0.0
+var float dailyVWAP   = na
+
+if isNewDay
+    dVwapSum    := typPrice * volume
+    dVwapVolSum := volume
+    dailyVWAP   := typPrice
+else
+    dVwapSum    += typPrice * volume
+    dVwapVolSum += volume
+    dailyVWAP   := dVwapVolSum > 0 ? dVwapSum / dVwapVolSum : typPrice
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  SESSION VWAP                                            ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+var float sVwapSum    = 0.0
+var float sVwapVolSum = 0.0
+var float sesVWAP     = na
+var float prevSVWAP   = na
+
+if newSes
+    prevSVWAP   := na
+    sVwapSum    := typPrice * volume
+    sVwapVolSum := volume
+    sesVWAP     := typPrice
+else if inAnySes
+    sVwapSum    += typPrice * volume
+    sVwapVolSum += volume
+    prevSVWAP   := sesVWAP
+    sesVWAP     := sVwapVolSum > 0 ? sVwapSum / sVwapVolSum : typPrice
+
+vwapSlope   = not na(prevSVWAP) and not na(sesVWAP) ? sesVWAP - prevSVWAP : 0.0
+vwapBull    = inAnySes and close > sesVWAP and close > dailyVWAP and vwapSlope > 0
+vwapBear    = inAnySes and close < sesVWAP and close < dailyVWAP and vwapSlope < 0
+vwapNeutral = inAnySes and not vwapBull and not vwapBear
+
+vwapCol = vwapBull ? color.green : vwapBear ? color.red : color.gray
+plot(inAnySes ? sesVWAP  : na, "Session VWAP", vwapCol, 2, plot.style_linebr)
+plot(dailyVWAP, "Daily VWAP", color.new(color.white, 40), 1, plot.style_linebr)
+
+vwapBiasStr = vwapBull ? "Bullish" : vwapBear ? "Bearish" : "Neutral"
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  MARKET STRUCTURE — Current TF                           ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+pvtHi = ta.pivothigh(high, i_structLen, i_structLen)
+pvtLo = ta.pivotlow(low, i_structLen, i_structLen)
+
+var float lastPH = na
+var float prevPH = na
+var float lastPL = na
+var float prevPL = na
+
+if not na(pvtHi)
+    prevPH := lastPH
+    lastPH := pvtHi
+if not na(pvtLo)
+    prevPL := lastPL
+    lastPL := pvtLo
+
+structBull = not na(prevPH) and not na(prevPL) and lastPH > prevPH and lastPL > prevPL
+structBear = not na(prevPH) and not na(prevPL) and lastPH < prevPH and lastPL < prevPL
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  HTF BIAS — 1H & 4H                                     ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+[h1Hi, h1Lo] = request.security(syminfo.tickerid, "60",  [high, low], lookahead = barmerge.lookahead_off)
+[h4Hi, h4Lo] = request.security(syminfo.tickerid, "240", [high, low], lookahead = barmerge.lookahead_off)
+
+pvtH1H = ta.pivothigh(h1Hi, i_htfLen1H, i_htfLen1H)
+pvtL1H = ta.pivotlow(h1Lo, i_htfLen1H, i_htfLen1H)
+pvtH4H = ta.pivothigh(h4Hi, i_htfLen4H, i_htfLen4H)
+pvtL4H = ta.pivotlow(h4Lo, i_htfLen4H, i_htfLen4H)
+
+var float lph1 = na
+var float pph1 = na
+var float lpl1 = na
+var float ppl1 = na
+
+if not na(pvtH1H)
+    pph1 := lph1
+    lph1 := pvtH1H
+if not na(pvtL1H)
+    ppl1 := lpl1
+    lpl1 := pvtL1H
+
+var float lph4 = na
+var float pph4 = na
+var float lpl4 = na
+var float ppl4 = na
+
+if not na(pvtH4H)
+    pph4 := lph4
+    lph4 := pvtH4H
+if not na(pvtL4H)
+    ppl4 := lpl4
+    lpl4 := pvtL4H
+
+bull1H = not na(pph1) and not na(ppl1) and lph1 > pph1 and lpl1 > ppl1
+bear1H = not na(pph1) and not na(ppl1) and lph1 < pph1 and lpl1 < ppl1
+bull4H = not na(pph4) and not na(ppl4) and lph4 > pph4 and lpl4 > ppl4
+bear4H = not na(pph4) and not na(ppl4) and lph4 < pph4 and lpl4 < ppl4
+
+htfBull = bull1H and bull4H
+htfBear = bear1H and bear4H
+
+structStr = structBull ? "Bullish" : structBear ? "Bearish" : "Neutral"
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  VOLUME ENGINE                                           ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+volMA   = ta.sma(volume, i_volLen)
+volExp  = volume > volMA * i_volMult
+volOK   = volume > volMA
+lowVol  = volume < volMA * 0.6
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  SWING POINTS & LIQUIDITY TARGETS                        ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+swLo  = ta.lowest(low, i_swingLen)
+swHi  = ta.highest(high, i_swingLen)
+atr14 = ta.atr(14)
+
+prevSwHi = ta.highest(high, i_liqLook)
+prevSwLo = ta.lowest(low, i_liqLook)
+
+nearRes = not na(lastPH) and math.abs(close - lastPH) < atr14 * 1.5
+nearSup = not na(lastPL) and math.abs(close - lastPL) < atr14 * 1.5
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  CONSOLIDATION DETECTION                                 ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+rangeHi    = ta.highest(high, 10)
+rangeLo    = ta.lowest(low, 10)
+rangeWidth = rangeHi - rangeLo
+isConsol   = rangeWidth < atr14 * 0.8
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  LIQUIDITY SWEEP DETECTION                               ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+sweepMinDist = atr14 * i_sweepATR
+
+sellSideSweep = not na(sesLo) and orbDone and low < sesLo and close > sesLo and (sesLo - low) >= sweepMinDist
+buySideSweep  = not na(sesHi) and orbDone and high > sesHi and close < sesHi and (high - sesHi) >= sweepMinDist
+
+orbFalseBreakDn = orbDone and low < orbLo and close > orbLo and (orbLo - low) >= sweepMinDist * 0.5
+orbFalseBreakUp = orbDone and high > orbHi and close < orbHi and (high - orbHi) >= sweepMinDist * 0.5
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  ORB BREAKOUT & RETEST                                   ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+orbBreakUp = orbDone and close > orbHi and close[1] <= orbHi
+orbBreakDn = orbDone and close < orbLo and close[1] >= orbLo
+
+var int barsSinceOrbBreakUp = 999
+var int barsSinceOrbBreakDn = 999
+
+if orbBreakUp
+    barsSinceOrbBreakUp := 0
+else
+    barsSinceOrbBreakUp += 1
+
+if orbBreakDn
+    barsSinceOrbBreakDn := 0
+else
+    barsSinceOrbBreakDn += 1
+
+retestOrbHi = barsSinceOrbBreakUp > 0 and barsSinceOrbBreakUp <= i_retestBars and low <= orbHi and close > orbHi
+retestOrbLo = barsSinceOrbBreakDn > 0 and barsSinceOrbBreakDn <= i_retestBars and high >= orbLo and close < orbLo
+
+retestVwapBull = not na(sesVWAP) and low <= sesVWAP * 1.001 and close > sesVWAP and vwapBull
+retestVwapBear = not na(sesVWAP) and high >= sesVWAP * 0.999 and close < sesVWAP and vwapBear
+
+bullRetest = retestOrbHi or retestVwapBull
+bearRetest = retestOrbLo or retestVwapBear
+
+// Rejection candle detection
+bullRejection = close > open and (close - low) > (high - close) * 2 and (close - open) > atr14 * 0.3
+bearRejection = close < open and (high - close) > (close - low) * 2 and (open - close) > atr14 * 0.3
+
+// Structure shift
+var bool structShiftBull = false
+var bool structShiftBear = false
+
+structShiftBull := structBear[1] and structBull
+structShiftBear := structBull[1] and structBear
+
+if not na(pvtLo) and not na(prevPL)
+    if pvtLo > prevPL and structBear[5]
+        structShiftBull := true
+
+if not na(pvtHi) and not na(prevPH)
+    if pvtHi < prevPH and structBull[5]
+        structShiftBear := true
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  INSIDE ORB CHECK                                        ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+insideORB = orbDone and close <= orbHi and close >= orbLo
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  TRADE STATE                                             ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+var int    sesTradeCount = 0
+var bool   longTrigg     = false
+var bool   shortTrigg    = false
+var float  entryPx       = na
+var float  stopPx        = na
+var float  tp1Px         = na
+var float  tp2Px         = na
+var float  tp3Px         = na
+var bool   tp1Hit        = false
+var bool   tp2Hit        = false
+var bool   tp3Hit        = false
+var int    tDir          = 0
+var int    lastScore     = 0
+var string lastGradeStr  = ""
+var string lastSetupType = ""
+
+if newSes
+    sesTradeCount := 0
+    longTrigg     := false
+    shortTrigg    := false
+    entryPx       := na
+    stopPx        := na
+    tp1Px         := na
+    tp2Px         := na
+    tp3Px         := na
+    tp1Hit        := false
+    tp2Hit        := false
+    tp3Hit        := false
+    tDir          := 0
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  SCORING ENGINE                                          ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+scoreLongCont() =>
+    int s = 0
+    if vwapBull
+        s += 20
+    if close > dailyVWAP
+        s += 5
+    if structBull
+        s += 15
+    if htfBull
+        s += 10
+    if orbBreakUp or (barsSinceOrbBreakUp <= i_retestBars and close > orbHi)
+        s += 15
+    if bullRetest
+        s += 10
+    if bullRejection
+        s += 5
+    if volOK
+        s += 10
+    if volExp
+        s += 5
+    if not nearRes
+        s += 5
+    s
+
+scoreShortCont() =>
+    int s = 0
+    if vwapBear
+        s += 20
+    if close < dailyVWAP
+        s += 5
+    if structBear
+        s += 15
+    if htfBear
+        s += 10
+    if orbBreakDn or (barsSinceOrbBreakDn <= i_retestBars and close < orbLo)
+        s += 15
+    if bearRetest
+        s += 10
+    if bearRejection
+        s += 5
+    if volOK
+        s += 10
+    if volExp
+        s += 5
+    if not nearSup
+        s += 5
+    s
+
+scoreLongRev() =>
+    int s = 0
+    if sellSideSweep
+        s += 20
+    if orbFalseBreakDn
+        s += 15
+    if close > orbLo
+        s += 10
+    if close > sesVWAP or na(sesVWAP)
+        s += 10
+    if structShiftBull
+        s += 15
+    if volExp
+        s += 15
+    if bullRejection
+        s += 10
+    if close > dailyVWAP
+        s += 5
+    s
+
+scoreShortRev() =>
+    int s = 0
+    if buySideSweep
+        s += 20
+    if orbFalseBreakUp
+        s += 15
+    if close < orbHi
+        s += 10
+    if close < sesVWAP or na(sesVWAP)
+        s += 10
+    if structShiftBear
+        s += 15
+    if volExp
+        s += 15
+    if bearRejection
+        s += 10
+    if close < dailyVWAP
+        s += 5
+    s
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  ENTRY CONDITIONS                                        ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+canTrade = inAnySes and orbDone and sesTradeCount < i_maxTrades and not tp3Hit and not insideORB and not lowVol and not isConsol and not vwapNeutral
+
+// Continuation
+contLongScore  = scoreLongCont()
+contShortScore = scoreShortCont()
+
+contLongOK  = canTrade and not longTrigg and contLongScore >= 50 and close > orbHi and vwapBull and (bullRetest or orbBreakUp) and volOK
+contShortOK = canTrade and not shortTrigg and contShortScore >= 50 and close < orbLo and vwapBear and (bearRetest or orbBreakDn) and volOK
+
+// Reversal
+revLongScore  = scoreLongRev()
+revShortScore = scoreShortRev()
+
+revLongOK  = canTrade and not longTrigg and revLongScore >= 50 and (sellSideSweep or orbFalseBreakDn) and close > orbLo and volExp and not contLongOK
+revShortOK = canTrade and not shortTrigg and revShortScore >= 50 and (buySideSweep or orbFalseBreakUp) and close < orbHi and volExp and not contShortOK
+
+// Combined
+goLong  = contLongOK or revLongOK
+goShort = contShortOK or revShortOK
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  EXECUTE ENTRIES                                         ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if goLong
+    bool isRev  = revLongOK and not contLongOK
+    int score   = isRev ? revLongScore : contLongScore
+
+    float sl = na
+    if isRev
+        sl := math.min(low, nz(sesLo, low)) - atr14 * 0.2
+    else
+        sl := math.min(orbLo, swLo)
+
+    float risk = close - sl
+    if risk > 0 and risk < atr14 * 5
+        entryPx       := close
+        stopPx        := sl
+        tp1Px         := close + risk
+        tp2Px         := close + risk * 2
+        float liqTgt  = prevSwHi
+        tp3Px         := not na(liqTgt) and liqTgt > close + risk * 2 ? liqTgt : close + risk * 3
+        tp1Hit        := false
+        tp2Hit        := false
+        tp3Hit        := false
+        tDir          := 1
+        longTrigg     := true
+        sesTradeCount += 1
+        lastScore     := score
+        lastGradeStr  := fmtGrade(score)
+        lastSetupType := isRev ? "REVERSAL" : "CONTINUATION"
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", "Long", stop = sl, limit = tp3Px)
+
+if goShort
+    bool isRev  = revShortOK and not contShortOK
+    int score   = isRev ? revShortScore : contShortScore
+
+    float sl = na
+    if isRev
+        sl := math.max(high, nz(sesHi, high)) + atr14 * 0.2
+    else
+        sl := math.max(orbHi, swHi)
+
+    float risk = sl - close
+    if risk > 0 and risk < atr14 * 5
+        entryPx       := close
+        stopPx        := sl
+        tp1Px         := close - risk
+        tp2Px         := close - risk * 2
+        float liqTgt  = prevSwLo
+        tp3Px         := not na(liqTgt) and liqTgt < close - risk * 2 ? liqTgt : close - risk * 3
+        tp1Hit        := false
+        tp2Hit        := false
+        tp3Hit        := false
+        tDir          := -1
+        shortTrigg    := true
+        sesTradeCount += 1
+        lastScore     := score
+        lastGradeStr  := fmtGrade(score)
+        lastSetupType := isRev ? "REVERSAL" : "CONTINUATION"
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", "Short", stop = sl, limit = tp3Px)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  TP TRACKING                                             ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if tDir == 1 and not na(entryPx)
+    if not tp1Hit and high >= tp1Px
+        tp1Hit := true
+    if not tp2Hit and high >= tp2Px
+        tp2Hit := true
+    if not tp3Hit and high >= tp3Px
+        tp3Hit := true
+
+if tDir == -1 and not na(entryPx)
+    if not tp1Hit and low <= tp1Px
+        tp1Hit := true
+    if not tp2Hit and low <= tp2Px
+        tp2Hit := true
+    if not tp3Hit and low <= tp3Px
+        tp3Hit := true
+
+curRR = 0.0
+if not na(entryPx) and not na(stopPx) and tDir != 0
+    float r = math.abs(entryPx - stopPx)
+    if r > 0
+        curRR := tDir == 1 ? (close - entryPx) / r : (entryPx - close) / r
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  ENTRY LABELS                                            ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if goLong and not na(entryPx) and entryPx == close
+    bool isRev     = revLongOK and not contLongOK
+    string typeStr = isRev ? "LONG REVERSAL" : "LONG CONTINUATION"
+    string grade   = lastGradeStr
+
+    string info = grade + " " + typeStr +
+         "\nEntry: " + fmtP(entryPx) +
+         "\nStop: " + fmtP(stopPx) +
+         "\nTP1: " + fmtP(tp1Px) +
+         "\nTP2: " + fmtP(tp2Px) +
+         "\nTP3: " + fmtP(tp3Px)
+
+    string checks = "\n─────────────" +
+         "\n" + (vwapBull ? "✓" : "✗") + " VWAP Aligned" +
+         "\n" + (structBull or structShiftBull ? "✓" : "✗") + " Structure" +
+         "\n" + (close > orbHi or orbFalseBreakDn ? "✓" : "✗") + " ORB Confirmed" +
+         "\n" + (volOK ? "✓" : "✗") + " Volume" +
+         "\n" + (isRev and sellSideSweep ? "✓ Liq Sweep" : isRev ? "✗ Liq Sweep" : "")
+
+    label.new(bar_index, low, info + checks,
+         color     = color.new(color.green, 10),
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.large)
+
+if goShort and not na(entryPx) and entryPx == close
+    bool isRev     = revShortOK and not contShortOK
+    string typeStr = isRev ? "SHORT REVERSAL" : "SHORT CONTINUATION"
+    string grade   = lastGradeStr
+
+    string info = grade + " " + typeStr +
+         "\nEntry: " + fmtP(entryPx) +
+         "\nStop: " + fmtP(stopPx) +
+         "\nTP1: " + fmtP(tp1Px) +
+         "\nTP2: " + fmtP(tp2Px) +
+         "\nTP3: " + fmtP(tp3Px)
+
+    string checks = "\n─────────────" +
+         "\n" + (vwapBear ? "✓" : "✗") + " VWAP Aligned" +
+         "\n" + (structBear or structShiftBear ? "✓" : "✗") + " Structure" +
+         "\n" + (close < orbLo or orbFalseBreakUp ? "✓" : "✗") + " ORB Confirmed" +
+         "\n" + (volOK ? "✓" : "✗") + " Volume" +
+         "\n" + (isRev and buySideSweep ? "✓ Liq Sweep" : isRev ? "✗ Liq Sweep" : "")
+
+    label.new(bar_index, high, info + checks,
+         color     = color.new(color.red, 10),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.large)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  LIQUIDITY SWEEP MARKERS                                 ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if sellSideSweep and inAnySes
+    label.new(bar_index, low, "SELL-SIDE\nSWEEP",
+         color     = color.new(color.yellow, 20),
+         textcolor = color.black,
+         style     = label.style_label_up,
+         size      = size.small)
+
+if buySideSweep and inAnySes
+    label.new(bar_index, high, "BUY-SIDE\nSWEEP",
+         color     = color.new(color.yellow, 20),
+         textcolor = color.black,
+         style     = label.style_label_down,
+         size      = size.small)
+
+// Structure shift markers
+if structShiftBull and inAnySes
+    label.new(bar_index, low, "MSS ▲",
+         color     = color.new(color.green, 40),
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.tiny)
+
+if structShiftBear and inAnySes
+    label.new(bar_index, high, "MSS ▼",
+         color     = color.new(color.red, 40),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.tiny)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  TP HIT LABELS                                           ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if tp1Hit and not tp1Hit[1]
+    label.new(bar_index, tDir == 1 ? high : low, "TP1 ✓ (1R)",
+         color     = color.new(color.green, 30),
+         textcolor = color.white,
+         style     = tDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.small)
+
+if tp2Hit and not tp2Hit[1]
+    label.new(bar_index, tDir == 1 ? high : low, "TP2 ✓ (2R)",
+         color     = color.new(color.green, 20),
+         textcolor = color.white,
+         style     = tDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.small)
+
+if tp3Hit and not tp3Hit[1]
+    label.new(bar_index, tDir == 1 ? high : low, "TP3 ✓ LIQ",
+         color     = color.new(color.lime, 10),
+         textcolor = color.black,
+         style     = tDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.normal)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  TP / SL LINES                                           ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+var line slLine  = na
+var line tp1Line = na
+var line tp2Line = na
+var line tp3Line = na
+var line entLine = na
+var label slLbl  = na
+var label tp1Lbl = na
+var label tp2Lbl = na
+var label tp3Lbl = na
+var label entLbl = na
+
+if (goLong or goShort) and i_showTP and not na(entryPx)
+    if not na(slLine)
+        line.delete(slLine)
+        line.delete(tp1Line)
+        line.delete(tp2Line)
+        line.delete(tp3Line)
+        line.delete(entLine)
+        label.delete(slLbl)
+        label.delete(tp1Lbl)
+        label.delete(tp2Lbl)
+        label.delete(tp3Lbl)
+        label.delete(entLbl)
+
+    int ext = bar_index + 60
+
+    float riskAmt  = math.abs(entryPx - stopPx)
+    string rrTP1   = riskAmt > 0 ? fmtP(math.abs(tp1Px - entryPx) / riskAmt) : "?"
+    string rrTP2   = riskAmt > 0 ? fmtP(math.abs(tp2Px - entryPx) / riskAmt) : "?"
+    string rrTP3   = riskAmt > 0 ? fmtP(math.abs(tp3Px - entryPx) / riskAmt) : "?"
+
+    entLine := line.new(bar_index, entryPx, ext, entryPx, color = color.white,  style = line.style_solid,  width = 2)
+    slLine  := line.new(bar_index, stopPx,  ext, stopPx,  color = color.red,    style = line.style_dashed, width = 2)
+    tp1Line := line.new(bar_index, tp1Px,   ext, tp1Px,   color = color.green,  style = line.style_dashed, width = 1)
+    tp2Line := line.new(bar_index, tp2Px,   ext, tp2Px,   color = color.green,  style = line.style_dashed, width = 1)
+    tp3Line := line.new(bar_index, tp3Px,   ext, tp3Px,   color = color.lime,   style = line.style_dashed, width = 2)
+
+    entLbl  := label.new(ext, entryPx, "ENTRY " + fmtP(entryPx),                          color = color.new(color.white, 30), textcolor = color.black, style = label.style_label_left, size = size.small)
+    slLbl   := label.new(ext, stopPx,  "STOP " + fmtP(stopPx),                            color = color.new(color.red, 30),   textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp1Lbl  := label.new(ext, tp1Px,   "TP1 " + fmtP(tp1Px) + " (" + rrTP1 + "R)",       color = color.new(color.green, 40), textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp2Lbl  := label.new(ext, tp2Px,   "TP2 " + fmtP(tp2Px) + " (" + rrTP2 + "R)",       color = color.new(color.green, 30), textcolor = color.white, style = label.style_label_left, size = size.small)
+    tp3Lbl  := label.new(ext, tp3Px,   "TP3 " + fmtP(tp3Px) + " (" + rrTP3 + "R) LIQ",   color = color.new(color.lime, 20),  textcolor = color.black, style = label.style_label_left, size = size.small)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  PERFORMANCE TRACKING                                    ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+var int   totTrades = 0
+var int   wins      = 0
+var float dayPnL    = 0.0
+
+if isNewDay
+    dayPnL := 0.0
+
+if strategy.closedtrades > 0
+    float lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if strategy.closedtrades > totTrades
+        totTrades := strategy.closedtrades
+        dayPnL    += lastProfit
+        if lastProfit > 0
+            wins += 1
+
+winRate = totTrades > 0 ? (wins * 100.0) / totTrades : 0.0
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  DASHBOARD                                               ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+if i_showDash and barstate.islast
+    var table dash = na
+
+    tblP = switch i_dashPos
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        => position.top_right
+
+    dash := table.new(tblP, 2, 14, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+
+    table.cell(dash, 0, 0, "VWAP+ORB PRO", text_color = color.white, text_size = size.normal, bgcolor = color.new(color.blue, 20))
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    table.cell(dash, 0, 1, "Session",       text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 1, sesName,          text_color = inAnySes ? color.lime : color.gray, text_size = size.small)
+
+    table.cell(dash, 0, 2, "VWAP Bias",    text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 2, vwapBiasStr,     text_color = vwapBull ? color.green : vwapBear ? color.red : color.gray, text_size = size.small)
+
+    table.cell(dash, 0, 3, "ORB Status",   text_color = color.silver, text_size = size.small)
+    orbSt = orbDone ? "Ready" : inAnySes ? "Building" : "Off"
+    table.cell(dash, 1, 3, orbSt,           text_color = orbDone ? color.lime : color.yellow, text_size = size.small)
+
+    orbDir = orbDone and close > orbHi ? "Bullish Break" : orbDone and close < orbLo ? "Bearish Break" : orbDone ? "Inside" : "—"
+    table.cell(dash, 0, 4, "ORB Dir",      text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 4, orbDir,           text_color = close > orbHi ? color.green : close < orbLo ? color.red : color.gray, text_size = size.small)
+
+    table.cell(dash, 0, 5, "Structure",    text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 5, structStr,       text_color = structBull ? color.green : structBear ? color.red : color.gray, text_size = size.small)
+
+    table.cell(dash, 0, 6, "Grade",        text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 6, lastGradeStr != "" ? lastGradeStr : "—", text_color = gradeColor(lastScore), text_size = size.small)
+
+    table.cell(dash, 0, 7, "Setup Type",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 7, lastSetupType != "" ? lastSetupType : "—", text_color = color.white, text_size = size.small)
+
+    table.cell(dash, 0, 8, "Trades",       text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 8, str.tostring(sesTradeCount) + "/" + str.tostring(i_maxTrades), text_color = color.white, text_size = size.small)
+
+    table.cell(dash, 0, 9, "Win Rate",     text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 9, fmtP(winRate) + "%", text_color = winRate >= 50 ? color.green : color.red, text_size = size.small)
+
+    table.cell(dash, 0, 10, "R:R",          text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 10, tDir != 0 ? fmtP(curRR) + "R" : "—", text_color = curRR >= 0 ? color.green : color.red, text_size = size.small)
+
+    table.cell(dash, 0, 11, "Day P&L",     text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 11, "$" + fmtP(dayPnL), text_color = dayPnL >= 0 ? color.green : color.red, text_size = size.small)
+
+    tpSt = ""
+    if tp1Hit
+        tpSt += "TP1✓ "
+    if tp2Hit
+        tpSt += "TP2✓ "
+    if tp3Hit
+        tpSt += "TP3✓"
+    table.cell(dash, 0, 12, "TP Status",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 12, tpSt != "" ? tpSt : "—", text_color = color.lime, text_size = size.small)
+
+    sesRng = not na(sesHi) and not na(sesLo) ? fmtP(sesHi - sesLo) : "—"
+    table.cell(dash, 0, 13, "Ses Range",   text_color = color.silver, text_size = size.small)
+    table.cell(dash, 1, 13, sesRng,         text_color = color.teal, text_size = size.small)
+
+// ╔═══════════════════════════════════════════════════════════╗
+// ║  ALERTS                                                  ║
+// ╚═══════════════════════════════════════════════════════════╝
+
+alertcondition(contLongOK,  title = "Long Continuation",  message = "LONG CONTINUATION — VWAP+ORB breakout confirmed")
+alertcondition(contShortOK, title = "Short Continuation",  message = "SHORT CONTINUATION — VWAP+ORB breakdown confirmed")
+alertcondition(revLongOK,   title = "Long Reversal",       message = "LONG REVERSAL — Liquidity sweep + reclaim confirmed")
+alertcondition(revShortOK,  title = "Short Reversal",      message = "SHORT REVERSAL — Liquidity sweep + rejection confirmed")
+alertcondition(sellSideSweep, title = "Sell-Side Sweep",   message = "Sell-side liquidity swept below session low")
+alertcondition(buySideSweep,  title = "Buy-Side Sweep",    message = "Buy-side liquidity swept above session high")
+alertcondition(tp1Hit and not tp1Hit[1], title = "TP1 Hit", message = "TP1 (1R) achieved")
+alertcondition(tp2Hit and not tp2Hit[1], title = "TP2 Hit", message = "TP2 (2R) achieved")
+alertcondition(tp3Hit and not tp3Hit[1], title = "TP3 Hit", message = "TP3 liquidity target achieved")
