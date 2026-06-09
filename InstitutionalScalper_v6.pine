@@ -955,6 +955,12 @@ string shortGrade = getGrade(shortScore)
 // SIGNAL GENERATION + FILTERING
 // ============================================================
 
+// HTF trend check — with-trend uses normal threshold, counter-trend needs 70+ (B+)
+bool htfLongOK  = dailyBias >= 0 or h4Bias >= 0
+bool htfShortOK = dailyBias <= 0 or h4Bias <= 0
+int  longReq    = htfLongOK  ? i_minScore : math.max(i_minScore, 70)
+int  shortReq   = htfShortOK ? i_minScore : math.max(i_minScore, 70)
+
 // Per-session counter (reset on new daily open)
 var int sessLongCnt  = 0
 var int sessShortCnt = 0
@@ -967,8 +973,8 @@ var int lastSigBar = 0
 bool cooldownOK = bar_index - lastSigBar > 3
 
 // Signal = score meets threshold + session cap not hit + cooldown clear
-bool longSignal  = i_showSig and longScore >= i_minScore and sessLongCnt < i_maxSig and cooldownOK
-bool shortSignal = i_showSig and shortScore >= i_minScore and sessShortCnt < i_maxSig and cooldownOK and not longSignal
+bool longSignal  = i_showSig and longScore >= longReq and sessLongCnt < i_maxSig and cooldownOK
+bool shortSignal = i_showSig and shortScore >= shortReq and sessShortCnt < i_maxSig and cooldownOK and not longSignal
 
 if longSignal
     sessLongCnt := sessLongCnt + 1
