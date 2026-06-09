@@ -553,6 +553,99 @@ plotshape(show_signals and vwap_short ? high + atr_val * 0.5 : na, "VWAP Short",
 plotshape(show_signals and liq_sweep_long  ? low  - atr_val * 0.7 : na, "Liq Long",  shape.diamond, location.absolute, color.new(color.teal, 0),   size=size.small)
 plotshape(show_signals and liq_sweep_short ? high + atr_val * 0.7 : na, "Liq Short", shape.diamond, location.absolute, color.new(color.maroon, 0), size=size.small)
 
+// ============================================================================
+// SL / TP / ENTRY LABELS & LINES ON CHART
+// ============================================================================
+
+var line  entry_line  = na
+var line  sl_line     = na
+var line  tp_line     = na
+var label entry_label = na
+var label sl_label    = na
+var label tp_label    = na
+var bool  in_trade    = false
+var int   trade_bar   = na
+var float active_entry = na
+var float active_sl    = na
+var float active_tp    = na
+var string active_setup = ""
+var int   active_dir   = 0
+
+// Detect new entry this bar
+any_long_entry  = (orb_long_signal or liq_sweep_long or vwap_long) and strategy.opentrades > 0 and (strategy.opentrades > strategy.opentrades[1] or not in_trade)
+any_short_entry = (orb_short_signal or liq_sweep_short or vwap_short) and strategy.opentrades > 0 and (strategy.opentrades > strategy.opentrades[1] or not in_trade)
+new_entry = (strategy.opentrades > 0 and not in_trade) or (strategy.opentrades > strategy.opentrades[1])
+
+if new_entry and show_sl_tp
+    in_trade     := true
+    trade_bar    := bar_index
+    active_entry := last_entry_price
+    active_sl    := last_stop_price
+    active_tp    := last_tp_price
+    active_setup := last_setup_name
+    active_dir   := last_direction
+
+    // Delete old lines/labels if they exist
+    if not na(entry_line)
+        line.delete(entry_line)
+    if not na(sl_line)
+        line.delete(sl_line)
+    if not na(tp_line)
+        line.delete(tp_line)
+    if not na(entry_label)
+        label.delete(entry_label)
+    if not na(sl_label)
+        label.delete(sl_label)
+    if not na(tp_label)
+        label.delete(tp_label)
+
+    // Calculate risk for label text
+    risk_pts = math.abs(active_entry - active_sl)
+
+    // --- ENTRY LINE ---
+    entry_line := line.new(bar_index, active_entry, bar_index + 20, active_entry,
+         color=color.new(color.white, 0), style=line.style_solid, width=2)
+    entry_label := label.new(bar_index + 21, active_entry,
+         text=active_setup + " ENTRY: " + str.tostring(active_entry, format.mintick),
+         style=label.style_label_left, color=color.new(color.white, 20),
+         textcolor=color.black, size=size.small)
+
+    // --- STOP LOSS LINE ---
+    sl_line := line.new(bar_index, active_sl, bar_index + 20, active_sl,
+         color=color.new(color.red, 0), style=line.style_dashed, width=2)
+    sl_label := label.new(bar_index + 21, active_sl,
+         text="SL: " + str.tostring(active_sl, format.mintick) + "  (-" + str.tostring(risk_pts, format.mintick) + ")",
+         style=label.style_label_left, color=color.new(color.red, 20),
+         textcolor=color.white, size=size.small)
+
+    // --- TAKE PROFIT LINE ---
+    tp_line := line.new(bar_index, active_tp, bar_index + 20, active_tp,
+         color=color.new(color.green, 0), style=line.style_dashed, width=2)
+    tp_label := label.new(bar_index + 21, active_tp,
+         text="TP: " + str.tostring(active_tp, format.mintick) + "  (+" + str.tostring(math.abs(active_tp - active_entry), format.mintick) + "  " + str.tostring(rr_ratio, "#.#") + "R)",
+         style=label.style_label_left, color=color.new(color.green, 20),
+         textcolor=color.white, size=size.small)
+
+// Extend lines while in trade
+if in_trade and strategy.opentrades > 0 and show_sl_tp
+    if not na(entry_line)
+        line.set_x2(entry_line, bar_index + 5)
+    if not na(sl_line)
+        line.set_x2(sl_line, bar_index + 5)
+    if not na(tp_line)
+        line.set_x2(tp_line, bar_index + 5)
+    if not na(entry_label)
+        label.set_x(entry_label, bar_index + 6)
+    if not na(sl_label)
+        label.set_x(sl_label, bar_index + 6)
+    if not na(tp_label)
+        label.set_x(tp_label, bar_index + 6)
+
+// Clean up when trade closes
+if in_trade and strategy.opentrades == 0
+    in_trade := false
+    // Keep lines visible but stop extending — they stay on chart as history
+
 // --- Session Background ---
 bgcolor(is_ny_session ? color.new(color.blue, 95) : na, title="NY Session")
 bgcolor(is_first_5_min ? color.new(color.red, 90) : na, title="No Trade Zone (First 5 Min)")
