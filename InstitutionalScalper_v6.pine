@@ -115,7 +115,7 @@ i_fvgWin     = input.int(4, "FVG Valid Window (bars)",        minval = 1, group 
 grpLiq       = "Liquidity"
 i_showLiq    = input.bool(true,  "Show Equal Levels",         group = grpLiq)
 i_liqTol     = input.float(0.1,  "Equal Level Tolerance %",   minval = 0.01, maxval = 2.0, step = 0.01, group = grpLiq)
-i_sweepWin   = input.int(3, "Sweep Valid Window (bars)",      minval = 1, maxval = 10, group = grpLiq)
+i_sweepWin   = input.int(5, "Sweep Valid Window (bars)",      minval = 1, maxval = 20, group = grpLiq)
 i_showSweeps = input.bool(true,  "Show Sweep Markers",        group = grpLiq)
 
 // ============================================================
@@ -136,12 +136,12 @@ i_showAsiaORB = input.bool(true,  "Asia (0:00 UTC)",          group = grpORB)
 
 grpSig      = "Strategy Signals"
 i_showSig   = input.bool(true,  "Show Trade Signals",         group = grpSig)
-i_minScore  = input.int(60, "Minimum Score (0–100)",          minval = 0, maxval = 100, group = grpSig)
+i_minScore  = input.int(40, "Minimum Score (0–100)",          minval = 0, maxval = 100, group = grpSig)
 i_showSLTP  = input.bool(true,  "Show SL / TP Lines",         group = grpSig)
 i_tp1R      = input.float(1.0,  "TP1 R", minval = 0.5, step = 0.25, group = grpSig)
 i_tp2R      = input.float(2.0,  "TP2 R", minval = 1.0, step = 0.25, group = grpSig)
 i_tp3R      = input.float(3.0,  "TP3 R", minval = 1.5, step = 0.25, group = grpSig)
-i_maxSig    = input.int(2, "Max Signals Per Session",         minval = 1, maxval = 5, group = grpSig)
+i_maxSig    = input.int(3, "Max Signals Per Session",         minval = 1, maxval = 10, group = grpSig)
 i_atrLen    = input.int(14, "ATR Length", minval = 2,         group = grpSig)
 i_atrMult   = input.float(0.5, "ATR SL Buffer ×",            minval = 0.1, step = 0.1, group = grpSig)
 
@@ -912,21 +912,29 @@ int vwapBearPts = (not aboveVWAP) and (not aboveWkVWAP) ? 15 : (not aboveVWAP) ?
 
 // Volume / Order Flow Expansion — 15 pts
 int volBullPts = volSpike and close > open ? 15 :
-                 volSpike               ? 8  :
-                 deltaPos and cvdUp     ? 5  : 0
+                 volSpike               ? 10 :
+                 deltaPos and cvdUp     ? 8  :
+                 deltaPos               ? 5  :
+                 volume > avgVol        ? 3  : 0
 int volBearPts = volSpike and close < open ? 15 :
-                 volSpike               ? 8  :
-                 deltaNeg and cvdDown   ? 5  : 0
+                 volSpike               ? 10 :
+                 deltaNeg and cvdDown   ? 8  :
+                 deltaNeg               ? 5  :
+                 volume > avgVol        ? 3  : 0
 
 // Structure / FVG / Displacement — 15 pts
+bool _emaBull = emaF > emaM and emaM > emaS
+bool _emaBear = emaF < emaM and emaM < emaS
 int strBullPts = recentBullShift               ? 15 :
-                 bullStructure                 ? 8  :
-                 (recentBullFVG or inBullFVG) ? 5  :
-                 recentBullDisp                ? 3  : 0
+                 bullStructure                 ? 10 :
+                 (recentBullFVG or inBullFVG) ? 8  :
+                 recentBullDisp                ? 6  :
+                 _emaBull                      ? 4  : 0
 int strBearPts = recentBearShift               ? 15 :
-                 bearStructure                 ? 8  :
-                 (recentBearFVG or inBearFVG) ? 5  :
-                 recentBearDisp                ? 3  : 0
+                 bearStructure                 ? 10 :
+                 (recentBearFVG or inBearFVG) ? 8  :
+                 recentBearDisp                ? 6  :
+                 _emaBear                      ? 4  : 0
 
 // ORB Confirmation — 10 pts
 int orbBullPts = recentOrbBull ? 10 : 0
@@ -947,10 +955,6 @@ string shortGrade = getGrade(shortScore)
 // SIGNAL GENERATION + FILTERING
 // ============================================================
 
-// HTF must be at least neutral on daily and 4H
-bool htfLongOK  = dailyBias >= 0 and h4Bias >= 0
-bool htfShortOK = dailyBias <= 0 and h4Bias <= 0
-
 // Per-session counter (reset on new daily open)
 var int sessLongCnt  = 0
 var int sessShortCnt = 0
@@ -958,29 +962,20 @@ if vpNewDaily
     sessLongCnt  := 0
     sessShortCnt := 0
 
-// Dedup consecutive same-direction signals
-var bool lastWasLong  = false
-var bool lastWasShort = false
+// Cooldown: minimum bars between signals to avoid clusters
+var int lastSigBar = 0
+bool cooldownOK = bar_index - lastSigBar > 3
 
-// Hard requirements beyond score: must have a sweep + VWAP confirmation
-bool _rlA = i_showSig and longScore >= i_minScore and htfLongOK
-bool _rlB = sessLongCnt < i_maxSig and recentBullSweep and (aboveVWAP or vwapReclaim)
-bool rawLong = _rlA and _rlB
-bool _rsA = i_showSig and shortScore >= i_minScore and htfShortOK
-bool _rsB = sessShortCnt < i_maxSig and recentBearSweep and ((not aboveVWAP) or vwapReject)
-bool rawShort = _rsA and _rsB
-
-bool longSignal  = rawLong  and not lastWasLong
-bool shortSignal = rawShort and not lastWasShort
+// Signal = score meets threshold + session cap not hit + cooldown clear
+bool longSignal  = i_showSig and longScore >= i_minScore and sessLongCnt < i_maxSig and cooldownOK
+bool shortSignal = i_showSig and shortScore >= i_minScore and sessShortCnt < i_maxSig and cooldownOK and not longSignal
 
 if longSignal
-    sessLongCnt  := sessLongCnt  + 1
-    lastWasLong  := true
-    lastWasShort := false
+    sessLongCnt := sessLongCnt + 1
+    lastSigBar  := bar_index
 if shortSignal
-    sessShortCnt  := sessShortCnt + 1
-    lastWasShort  := true
-    lastWasLong   := false
+    sessShortCnt := sessShortCnt + 1
+    lastSigBar   := bar_index
 
 // ============================================================
 // TRADE MANAGEMENT — SL / TP
