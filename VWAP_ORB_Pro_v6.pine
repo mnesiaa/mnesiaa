@@ -638,83 +638,52 @@ if not na(entryPx) and not na(stopPx) and tDir != 0
 
 if goLong and not na(entryPx) and entryPx == close
     bool isRev     = revLongOK and not contLongOK
-    string typeStr = isRev ? "LONG REVERSAL" : "LONG CONTINUATION"
-    string grade   = lastGradeStr
+    string tag     = lastGradeStr + (isRev ? " LONG REV" : " LONG CONT")
 
-    string info = grade + " " + typeStr +
-         "\nEntry: " + fmtP(entryPx) +
-         "\nStop: " + fmtP(stopPx) +
-         "\nTP1: " + fmtP(tp1Px) +
-         "\nTP2: " + fmtP(tp2Px) +
-         "\nTP3: " + fmtP(tp3Px)
-
-    string checks = "\n─────────────" +
-         "\n" + (vwapBull ? "✓" : "✗") + " VWAP Aligned" +
-         "\n" + (structBull or structShiftBull ? "✓" : "✗") + " Structure" +
-         "\n" + (close > orbHi or orbFalseBreakDn ? "✓" : "✗") + " ORB Confirmed" +
-         "\n" + (volOK ? "✓" : "✗") + " Volume" +
-         "\n" + (isRev and sellSideSweep ? "✓ Liq Sweep" : isRev ? "✗ Liq Sweep" : "")
-
-    label.new(bar_index, low, info + checks,
-         color     = color.new(color.green, 10),
+    label.new(bar_index, low, tag,
+         color     = color.new(color.green, 15),
          textcolor = color.white,
          style     = label.style_label_up,
-         size      = size.large)
+         size      = size.normal)
 
 if goShort and not na(entryPx) and entryPx == close
     bool isRev     = revShortOK and not contShortOK
-    string typeStr = isRev ? "SHORT REVERSAL" : "SHORT CONTINUATION"
-    string grade   = lastGradeStr
+    string tag     = lastGradeStr + (isRev ? " SHORT REV" : " SHORT CONT")
 
-    string info = grade + " " + typeStr +
-         "\nEntry: " + fmtP(entryPx) +
-         "\nStop: " + fmtP(stopPx) +
-         "\nTP1: " + fmtP(tp1Px) +
-         "\nTP2: " + fmtP(tp2Px) +
-         "\nTP3: " + fmtP(tp3Px)
-
-    string checks = "\n─────────────" +
-         "\n" + (vwapBear ? "✓" : "✗") + " VWAP Aligned" +
-         "\n" + (structBear or structShiftBear ? "✓" : "✗") + " Structure" +
-         "\n" + (close < orbLo or orbFalseBreakUp ? "✓" : "✗") + " ORB Confirmed" +
-         "\n" + (volOK ? "✓" : "✗") + " Volume" +
-         "\n" + (isRev and buySideSweep ? "✓ Liq Sweep" : isRev ? "✗ Liq Sweep" : "")
-
-    label.new(bar_index, high, info + checks,
-         color     = color.new(color.red, 10),
+    label.new(bar_index, high, tag,
+         color     = color.new(color.red, 15),
          textcolor = color.white,
          style     = label.style_label_down,
-         size      = size.large)
+         size      = size.normal)
 
 // ╔═══════════════════════════════════════════════════════════╗
 // ║  LIQUIDITY SWEEP MARKERS                                 ║
 // ╚═══════════════════════════════════════════════════════════╝
 
 if sellSideSweep and inAnySes
-    label.new(bar_index, low, "SELL-SIDE\nSWEEP",
-         color     = color.new(color.yellow, 20),
+    label.new(bar_index, low, "SSL",
+         color     = color.new(color.yellow, 30),
          textcolor = color.black,
          style     = label.style_label_up,
-         size      = size.small)
+         size      = size.tiny)
 
 if buySideSweep and inAnySes
-    label.new(bar_index, high, "BUY-SIDE\nSWEEP",
-         color     = color.new(color.yellow, 20),
+    label.new(bar_index, high, "BSL",
+         color     = color.new(color.yellow, 30),
          textcolor = color.black,
          style     = label.style_label_down,
-         size      = size.small)
+         size      = size.tiny)
 
-// Structure shift markers
 if structShiftBull and inAnySes
-    label.new(bar_index, low, "MSS ▲",
-         color     = color.new(color.green, 40),
+    label.new(bar_index, low, "▲",
+         color     = color.new(color.green, 50),
          textcolor = color.white,
          style     = label.style_label_up,
          size      = size.tiny)
 
 if structShiftBear and inAnySes
-    label.new(bar_index, high, "MSS ▼",
-         color     = color.new(color.red, 40),
+    label.new(bar_index, high, "▼",
+         color     = color.new(color.red, 50),
          textcolor = color.white,
          style     = label.style_label_down,
          size      = size.tiny)
@@ -724,25 +693,25 @@ if structShiftBear and inAnySes
 // ╚═══════════════════════════════════════════════════════════╝
 
 if tp1Hit and not tp1Hit[1]
-    label.new(bar_index, tDir == 1 ? high : low, "TP1 ✓ (1R)",
+    label.new(bar_index, tDir == 1 ? high : low, "1R ✓",
+         color     = color.new(color.green, 40),
+         textcolor = color.white,
+         style     = tDir == 1 ? label.style_label_down : label.style_label_up,
+         size      = size.tiny)
+
+if tp2Hit and not tp2Hit[1]
+    label.new(bar_index, tDir == 1 ? high : low, "2R ✓",
          color     = color.new(color.green, 30),
          textcolor = color.white,
          style     = tDir == 1 ? label.style_label_down : label.style_label_up,
-         size      = size.small)
+         size      = size.tiny)
 
-if tp2Hit and not tp2Hit[1]
-    label.new(bar_index, tDir == 1 ? high : low, "TP2 ✓ (2R)",
+if tp3Hit and not tp3Hit[1]
+    label.new(bar_index, tDir == 1 ? high : low, "3R ✓",
          color     = color.new(color.green, 20),
          textcolor = color.white,
          style     = tDir == 1 ? label.style_label_down : label.style_label_up,
          size      = size.small)
-
-if tp3Hit and not tp3Hit[1]
-    label.new(bar_index, tDir == 1 ? high : low, "TP3 ✓ LIQ",
-         color     = color.new(color.lime, 10),
-         textcolor = color.black,
-         style     = tDir == 1 ? label.style_label_down : label.style_label_up,
-         size      = size.normal)
 
 // ╔═══════════════════════════════════════════════════════════╗
 // ║  TP / SL LINES                                           ║
@@ -779,17 +748,17 @@ if (goLong or goShort) and i_showTP and not na(entryPx)
     string rrTP2   = riskAmt > 0 ? fmtP(math.abs(tp2Px - entryPx) / riskAmt) : "?"
     string rrTP3   = riskAmt > 0 ? fmtP(math.abs(tp3Px - entryPx) / riskAmt) : "?"
 
-    entLine := line.new(bar_index, entryPx, ext, entryPx, color = color.white,  style = line.style_solid,  width = 2)
-    slLine  := line.new(bar_index, stopPx,  ext, stopPx,  color = color.red,    style = line.style_dashed, width = 2)
-    tp1Line := line.new(bar_index, tp1Px,   ext, tp1Px,   color = color.green,  style = line.style_dashed, width = 1)
-    tp2Line := line.new(bar_index, tp2Px,   ext, tp2Px,   color = color.green,  style = line.style_dashed, width = 1)
-    tp3Line := line.new(bar_index, tp3Px,   ext, tp3Px,   color = color.lime,   style = line.style_dashed, width = 2)
+    entLine := line.new(bar_index, entryPx, ext, entryPx, color = color.new(color.white, 30),  style = line.style_dotted, width = 1)
+    slLine  := line.new(bar_index, stopPx,  ext, stopPx,  color = color.new(color.red, 30),    style = line.style_dashed, width = 1)
+    tp1Line := line.new(bar_index, tp1Px,   ext, tp1Px,   color = color.new(color.green, 40),  style = line.style_dotted, width = 1)
+    tp2Line := line.new(bar_index, tp2Px,   ext, tp2Px,   color = color.new(color.green, 40),  style = line.style_dotted, width = 1)
+    tp3Line := line.new(bar_index, tp3Px,   ext, tp3Px,   color = color.new(color.green, 30),  style = line.style_dashed, width = 1)
 
-    entLbl  := label.new(ext, entryPx, "ENTRY " + fmtP(entryPx),                          color = color.new(color.white, 30), textcolor = color.black, style = label.style_label_left, size = size.small)
-    slLbl   := label.new(ext, stopPx,  "STOP " + fmtP(stopPx),                            color = color.new(color.red, 30),   textcolor = color.white, style = label.style_label_left, size = size.small)
-    tp1Lbl  := label.new(ext, tp1Px,   "TP1 " + fmtP(tp1Px) + " (" + rrTP1 + "R)",       color = color.new(color.green, 40), textcolor = color.white, style = label.style_label_left, size = size.small)
-    tp2Lbl  := label.new(ext, tp2Px,   "TP2 " + fmtP(tp2Px) + " (" + rrTP2 + "R)",       color = color.new(color.green, 30), textcolor = color.white, style = label.style_label_left, size = size.small)
-    tp3Lbl  := label.new(ext, tp3Px,   "TP3 " + fmtP(tp3Px) + " (" + rrTP3 + "R) LIQ",   color = color.new(color.lime, 20),  textcolor = color.black, style = label.style_label_left, size = size.small)
+    entLbl  := label.new(ext, entryPx, fmtP(entryPx),                    color = color.new(color.white, 40), textcolor = color.black, style = label.style_label_left, size = size.tiny)
+    slLbl   := label.new(ext, stopPx,  "SL " + fmtP(stopPx),           color = color.new(color.red, 40),   textcolor = color.white, style = label.style_label_left, size = size.tiny)
+    tp1Lbl  := label.new(ext, tp1Px,   rrTP1 + "R",                    color = color.new(color.green, 50), textcolor = color.white, style = label.style_label_left, size = size.tiny)
+    tp2Lbl  := label.new(ext, tp2Px,   rrTP2 + "R",                    color = color.new(color.green, 40), textcolor = color.white, style = label.style_label_left, size = size.tiny)
+    tp3Lbl  := label.new(ext, tp3Px,   rrTP3 + "R",                    color = color.new(color.green, 30), textcolor = color.white, style = label.style_label_left, size = size.tiny)
 
 // ╔═══════════════════════════════════════════════════════════╗
 // ║  PERFORMANCE TRACKING                                    ║
