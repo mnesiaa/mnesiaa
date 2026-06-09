@@ -1,11 +1,8 @@
-// ============================================================================
+//@version=5
 // NY AM SESSION SCALPING STRATEGY v1.0
 // Opening Range Breakout | VWAP Reclaim/Rejection | Liquidity Sweep
 // Works on: Futures (ES/NQ), ETFs (SPY/QQQ), Forex, Stocks
 // Timeframe: 5-minute chart (recommended)
-// ============================================================================
-
-//@version=5
 strategy("NY AM Scalper — ORB + VWAP + Liquidity Sweep",
      overlay        = true,
      default_qty_type = strategy.percent_of_equity,
