@@ -760,11 +760,10 @@ if i_showLiq
         eqLowLine := na
 
 // Sweep markers
-if i_showSweeps
-    plotshape(bullSweep_b, location = location.belowbar, style = shape.circle,
-         color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
-    plotshape(bearSweep_b, location = location.abovebar, style = shape.circle,
-         color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
+plotshape(i_showSweeps and bullSweep_b, location = location.belowbar, style = shape.circle,
+     color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
+plotshape(i_showSweeps and bearSweep_b, location = location.abovebar, style = shape.circle,
+     color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
 
 // ============================================================
 // OPENING RANGE BREAKOUT MODULE
@@ -868,9 +867,9 @@ if i_showORB
         box.set_right(asiaORBBox, bar_index)
 
 // ORB breakout signals
-bool orbBullBreak = (nyORBDone  and not na(nyORBH)  and close > nyORBH  and close[1] <= nyORBH)  or
+bool orbBullBreak = (nyORBDone  and not na(nyORBH)  and close > nyORBH  and close[1] <= nyORBH)  or \
                    (lonORBDone and not na(lonORBH) and close > lonORBH and close[1] <= lonORBH)
-bool orbBearBreak = (nyORBDone  and not na(nyORBL)  and close < nyORBL  and close[1] >= nyORBL)  or
+bool orbBearBreak = (nyORBDone  and not na(nyORBL)  and close < nyORBL  and close[1] >= nyORBL)  or \
                    (lonORBDone and not na(lonORBL) and close < lonORBL and close[1] >= lonORBL)
 
 var bool recentOrbBull = false
@@ -962,11 +961,11 @@ var bool lastWasLong  = false
 var bool lastWasShort = false
 
 // Hard requirements beyond score: must have a sweep + VWAP confirmation
-bool rawLong  = i_showSig and longScore  >= i_minScore and htfLongOK  and
-                sessLongCnt  < i_maxSig and recentBullSweep and
+bool rawLong  = i_showSig and longScore  >= i_minScore and htfLongOK  and \
+                sessLongCnt  < i_maxSig and recentBullSweep and \
                 (aboveVWAP or vwapReclaim)
-bool rawShort = i_showSig and shortScore >= i_minScore and htfShortOK and
-                sessShortCnt < i_maxSig and recentBearSweep and
+bool rawShort = i_showSig and shortScore >= i_minScore and htfShortOK and \
+                sessShortCnt < i_maxSig and recentBearSweep and \
                 ((not aboveVWAP) or vwapReject)
 
 bool longSignal  = rawLong  and not lastWasLong
