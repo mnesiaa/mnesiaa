@@ -188,7 +188,7 @@ plotshape(nearPutWall and showSignals, title="Put Wall Warning", location=locati
      text="Put Wall", size=size.small)
 
 // ── INFO TABLE (TOP LEFT with enhanced metrics) ──────────────────────────────
-var table t = table.new(position.top_left, 2, 14,
+var table t = table.new(position.top_left, 2, 13,
      bgcolor=color.new(color.black, 20),
      border_color=color.new(color.gray, 60), border_width=1,
      frame_color=color.new(color.blue, 40), frame_width=2)
@@ -217,10 +217,11 @@ if barstate.islast
     // Nearest support/resistance with distance
     nearestSupport = distPutWall < distCallWall ? "Put Wall (" + str.tostring(distPutWall, priceFmt) + ")" : "Call Wall (" + str.tostring(distCallWall, priceFmt) + ")"
 
-    table.cell(t, 0, 0, "S&P 500 GEX",          colspan=2, bgcolor=color.new(#1565c0,40), text_color=color.white, text_size=size.small, text_halign=text.align_center)
+    table.cell(t, 0, 0, "S&P 500 GEX",          bgcolor=color.new(#1565c0,40), text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 0, chartSymbol,            bgcolor=color.new(#1565c0,40), text_color=color.gray,  text_size=size.tiny,  text_halign=text.align_right)
 
     table.cell(t, 0, 1, "Price",                text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 1, str.tostring(close, priceFmt), text_color=color.yellow, text_size=size.small, text_weight=text.weight_bold)
+    table.cell(t, 1, 1, str.tostring(close, priceFmt), text_color=color.yellow, text_size=size.small)
 
     table.cell(t, 0, 2, "Status",               text_color=color.gray,  text_size=size.tiny)
     table.cell(t, 1, 2, inCorridor,             bgcolor=corridorColor,  text_color=color.white, text_size=size.tiny)
@@ -231,7 +232,7 @@ if barstate.islast
     table.cell(t, 0, 4, "Bias",                 text_color=color.gray,  text_size=size.tiny)
     biasText  = netGEXneg and zeroAboveSpot ? "BEARISH ↓" : "BULLISH ↑"
     biasColor = netGEXneg and zeroAboveSpot ? color.new(#ff1744,30) : color.new(#00e676,30)
-    table.cell(t, 1, 4, biasText,               bgcolor=biasColor,      text_color=color.white, text_size=size.small, text_weight=text.weight_bold)
+    table.cell(t, 1, 4, biasText,               bgcolor=biasColor,      text_color=color.white, text_size=size.small)
 
     table.cell(t, 0, 5, "Zero Gamma",           text_color=color.gray,  text_size=size.tiny)
     table.cell(t, 1, 5, str.tostring(zeroGamma, priceFmt), bgcolor=zeroColor, text_color=color.white, text_size=size.tiny)
@@ -249,18 +250,15 @@ if barstate.islast
     table.cell(t, 1, 9, str.tostring(highPutStr, priceFmt) + " -" + str.tostring(distPutStrike, priceFmt), bgcolor=color.new(#ff6d00,50), text_color=color.white, text_size=size.tiny)
 
     table.cell(t, 0, 10, "Dist to 0Γ",         text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 10, str.tostring(distZeroGamma, priceFmt) + " pts", text_color=color.yellow, text_size=size.tiny, text_weight=text.weight_bold)
+    table.cell(t, 1, 10, str.tostring(distZeroGamma, priceFmt) + " pts", text_color=color.yellow, text_size=size.tiny)
 
     table.cell(t, 0, 11, "Nearest Support",    text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 11, nearestSupport,       text_color=color.orange, text_size=size.tiny, text_weight=text.weight_bold)
+    table.cell(t, 1, 11, nearestSupport,       text_color=color.orange, text_size=size.tiny)
 
-    table.cell(t, 0, 12, "Chart",              text_color=color.gray,  text_size=size.tiny)
-    table.cell(t, 1, 12, chartSymbol,          text_color=color.white, text_size=size.tiny)
-
-    table.cell(t, 0, 13, "Volume",             text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 0, 12, "Volume",             text_color=color.gray,  text_size=size.tiny)
     volStatus = volume > volSMA ? "Above Avg ↑" : "Below Avg ↓"
     volColor = volume > volSMA ? color.new(#00e676,30) : color.new(#ff6d00,30)
-    table.cell(t, 1, 13, volStatus,            bgcolor=volColor,       text_color=color.white, text_size=size.tiny)
+    table.cell(t, 1, 12, volStatus,            bgcolor=volColor,       text_color=color.white, text_size=size.tiny)
 
 // ── ALERTS ───────────────────────────────────────────────────────────────────
 alertcondition(bearSignal, "GEX SELL Signal", "GEX: SELL signal - consider short")
