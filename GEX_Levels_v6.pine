@@ -1,0 +1,249 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © ykzpfnpdv
+
+//@version=6
+indicator("S&P 500 GEX Levels – SPY / ES / MES", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S&P 500 GEX Key Levels Indicator
+// Works on: SPY, /ES, /MES, SPX — auto-converts between all scales
+// Enter your levels in SPY prices (from your GEX app), the indicator
+// converts them automatically to match whatever chart you're on.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── SYMBOL CONVERSION ────────────────────────────────────────────────────────
+grp0 = "Symbol Conversion"
+inputScale = input.string("SPY", "My GEX Levels Are In", options=["SPY", "/ES or SPX"], group=grp0,
+     tooltip="Select what scale your GEX app gives you levels in. The indicator auto-converts to match your chart.")
+
+// Auto-detect what chart we're on
+isFuturesChart = syminfo.type == "futures" or syminfo.ticker == "SPX" or syminfo.ticker == "SPX500USD"
+isSPYChart     = syminfo.ticker == "SPY" or syminfo.ticker == "SPY1!" or (syminfo.type == "stock" and not isFuturesChart)
+
+convRatio = input.float(10.0, "SPY to /ES Conversion Ratio", group=grp0, minval=1.0, maxval=15.0, step=0.1,
+     tooltip="SPY x 10 = approx /ES price. Fine-tune if needed (usually 10.0).")
+
+f_convert(inputPrice) =>
+    result = inputPrice
+    if inputScale == "SPY" and isFuturesChart
+        result := inputPrice * convRatio
+    else if inputScale == "/ES or SPX" and isSPYChart
+        result := inputPrice / convRatio
+    result
+
+// ── INPUTS: Update Daily ─────────────────────────────────────────────────────
+grp1 = "GEX Key Levels (Update Daily)"
+spotPrice_raw    = input.float(595.00, "Spot Price",         group=grp1)
+zeroGamma_raw    = input.float(597.00, "Zero Gamma Level",   group=grp1, tooltip="Price where dealer gamma flips. Above = bullish dealer hedging. Below = bearish.")
+callWall_raw     = input.float(610.00, "Call Wall",          group=grp1, tooltip="Major resistance - dealers sell calls here, suppresses upside")
+putWall_raw      = input.float(580.00, "Put Wall",           group=grp1, tooltip="Major support - dealers buy puts here, accelerates downside if breached")
+highStrike_raw   = input.float(600.00, "Key Call Strike",    group=grp1, tooltip="Largest positive gamma strike from heatmap")
+highPutStr_raw   = input.float(590.00, "Key Put Strike",     group=grp1, tooltip="Largest negative gamma strike from heatmap (0DTE)")
+
+spotPrice  = f_convert(spotPrice_raw)
+zeroGamma  = f_convert(zeroGamma_raw)
+callWall   = f_convert(callWall_raw)
+putWall    = f_convert(putWall_raw)
+highStrike = f_convert(highStrike_raw)
+highPutStr = f_convert(highPutStr_raw)
+
+grp2 = "GEX Regime"
+netGEXneg    = input.bool(true,    "Net GEX is NEGATIVE (bearish regime)", group=grp2, tooltip="When Net GEX < 0, market is in negative gamma - trends harder, more volatile")
+zeroAboveSpot= input.bool(true,    "Zero Gamma ABOVE Spot (bearish pressure)", group=grp2)
+
+grp3 = "Signal Settings"
+showLevels   = input.bool(true,    "Show GEX Level Lines",   group=grp3)
+showSignals  = input.bool(true,    "Show Buy/Sell Signals",  group=grp3)
+showLabels   = input.bool(true,    "Show Level Labels",      group=grp3)
+confirmBars  = input.int(2,        "Bars to Confirm Break",  group=grp3, minval=1, maxval=5)
+useVolume    = input.bool(true,    "Require Above-Avg Volume for Signal", group=grp3)
+
+grp4 = "Visuals"
+colCallWall  = input.color(color.new(#00e676, 80), "Call Wall Color",    group=grp4)
+colPutWall   = input.color(color.new(#ff1744, 80), "Put Wall Color",     group=grp4)
+colZeroGamma = input.color(color.new(#ffeb3b, 70), "Zero Gamma Color",   group=grp4)
+colCallStr   = input.color(color.new(#69f0ae, 60), "Call Strike Color",  group=grp4)
+colPutStr    = input.color(color.new(#ff6d00, 60), "Put Strike Color",   group=grp4)
+
+// ── Chart symbol label for dashboard ─────────────────────────────────────────
+chartSymbol = isFuturesChart ? "/ES" : "SPY"
+priceFmt    = format.mintick
+
+// ── LEVEL LINES (persistent, only created once) ──────────────────────────────
+var line lineCallWall  = na
+var line linePutWall   = na
+var line lineZeroGamma = na
+var line lineCallStr   = na
+var line linePutStr    = na
+
+if showLevels and barstate.islast
+    if na(lineCallWall)
+        lineCallWall  := line.new(bar_index - 200, callWall,  bar_index + 50, callWall,  color=colCallWall,  width=2, style=line.style_dashed)
+        linePutWall   := line.new(bar_index - 200, putWall,   bar_index + 50, putWall,   color=colPutWall,   width=2, style=line.style_dashed)
+        lineZeroGamma := line.new(bar_index - 200, zeroGamma, bar_index + 50, zeroGamma, color=colZeroGamma, width=2, style=line.style_dotted)
+        lineCallStr   := line.new(bar_index - 200, highStrike,bar_index + 50, highStrike,color=colCallStr,   width=1, style=line.style_dotted)
+        linePutStr    := line.new(bar_index - 200, highPutStr,bar_index + 50, highPutStr,color=colPutStr,    width=1, style=line.style_dotted)
+    else
+        line.set_x1(lineCallWall,  bar_index - 200)
+        line.set_x2(lineCallWall,  bar_index + 50)
+        line.set_y1(lineCallWall,  callWall)
+        line.set_y2(lineCallWall,  callWall)
+        line.set_x1(linePutWall,   bar_index - 200)
+        line.set_x2(linePutWall,   bar_index + 50)
+        line.set_y1(linePutWall,   putWall)
+        line.set_y2(linePutWall,   putWall)
+        line.set_x1(lineZeroGamma, bar_index - 200)
+        line.set_x2(lineZeroGamma, bar_index + 50)
+        line.set_y1(lineZeroGamma, zeroGamma)
+        line.set_y2(lineZeroGamma, zeroGamma)
+        line.set_x1(lineCallStr,   bar_index - 200)
+        line.set_x2(lineCallStr,   bar_index + 50)
+        line.set_y1(lineCallStr,   highStrike)
+        line.set_y2(lineCallStr,   highStrike)
+        line.set_x1(linePutStr,    bar_index - 200)
+        line.set_x2(linePutStr,    bar_index + 50)
+        line.set_y1(linePutStr,    highPutStr)
+        line.set_y2(linePutStr,    highPutStr)
+
+// ── LEVEL LABELS (persistent, only created once) ─────────────────────────────
+var label lblCallWall  = na
+var label lblPutWall   = na
+var label lblZeroGamma = na
+var label lblCallStr   = na
+var label lblPutStr    = na
+
+if showLabels and barstate.islast
+    cwText = "Call Wall " + str.tostring(callWall, priceFmt)
+    pwText = "Put Wall "  + str.tostring(putWall, priceFmt)
+    zgText = "Zero Gamma " + str.tostring(zeroGamma, priceFmt)
+    csText = "Call Strike " + str.tostring(highStrike, priceFmt)
+    psText = "Put Strike " + str.tostring(highPutStr, priceFmt)
+
+    if na(lblCallWall)
+        lblCallWall  := label.new(bar_index + 5, callWall,   cwText, style=label.style_label_left, color=color.new(#00e676,20), textcolor=color.white, size=size.small)
+        lblPutWall   := label.new(bar_index + 5, putWall,    pwText, style=label.style_label_left, color=color.new(#ff1744,20), textcolor=color.white, size=size.small)
+        lblZeroGamma := label.new(bar_index + 5, zeroGamma,  zgText, style=label.style_label_left, color=color.new(#ffeb3b,20), textcolor=color.black, size=size.small)
+        lblCallStr   := label.new(bar_index + 5, highStrike, csText, style=label.style_label_left, color=color.new(#69f0ae,20), textcolor=color.white, size=size.small)
+        lblPutStr    := label.new(bar_index + 5, highPutStr, psText, style=label.style_label_left, color=color.new(#ff6d00,20), textcolor=color.white, size=size.small)
+    else
+        label.set_x(lblCallWall,  bar_index + 5)
+        label.set_y(lblCallWall,  callWall)
+        label.set_text(lblCallWall, cwText)
+        label.set_x(lblPutWall,   bar_index + 5)
+        label.set_y(lblPutWall,   putWall)
+        label.set_text(lblPutWall, pwText)
+        label.set_x(lblZeroGamma, bar_index + 5)
+        label.set_y(lblZeroGamma, zeroGamma)
+        label.set_text(lblZeroGamma, zgText)
+        label.set_x(lblCallStr,   bar_index + 5)
+        label.set_y(lblCallStr,   highStrike)
+        label.set_text(lblCallStr, csText)
+        label.set_x(lblPutStr,    bar_index + 5)
+        label.set_y(lblPutStr,    highPutStr)
+        label.set_text(lblPutStr, psText)
+
+// ── BACKGROUND: GEX REGIME ZONES ─────────────────────────────────────────────
+inGammaCorridor = close >= putWall and close <= callWall
+bgcolor(inGammaCorridor ? color.new(color.blue, 97) : na, title="Gamma Corridor")
+
+// ── SIGNAL LOGIC ─────────────────────────────────────────────────────────────
+volSMA      = ta.sma(volume, 20)
+highVolume  = volume > volSMA or not useVolume
+
+// BEARISH SIGNALS
+nearZeroGamma   = math.abs(close - zeroGamma) < (zeroGamma * 0.002)
+rejectZeroGamma = close[1] >= zeroGamma and close < zeroGamma and highVolume
+breakPutStrike  = close < highPutStr and close[confirmBars] >= highPutStr and highVolume
+nearPutWall     = close <= (putWall + (putWall * 0.005)) and close >= putWall and highVolume
+
+// BULLISH SIGNALS
+reclaimZeroGamma = close > zeroGamma and close[1] <= zeroGamma and highVolume
+bounceCallStrike = close > highStrike and close[confirmBars] <= highStrike and not netGEXneg and highVolume
+holdPutStrike    = close > highPutStr and low <= highPutStr and close > open and highVolume
+
+// ── PLOT SIGNALS ─────────────────────────────────────────────────────────────
+bearSignal = showSignals and (rejectZeroGamma or breakPutStrike)
+bullSignal = showSignals and (reclaimZeroGamma or holdPutStrike)
+
+plotshape(bearSignal, title="SELL Signal", location=location.abovebar,
+     style=shape.labeldown, color=color.new(#ff1744, 0), textcolor=color.white,
+     text="SELL\nShort", size=size.normal)
+
+plotshape(bullSignal, title="BUY Signal", location=location.belowbar,
+     style=shape.labelup, color=color.new(#00e676, 0), textcolor=color.white,
+     text="BUY\nLong", size=size.normal)
+
+plotshape(nearPutWall and showSignals, title="Put Wall Warning", location=location.abovebar,
+     style=shape.triangledown, color=color.new(#ff6d00, 0), textcolor=color.white,
+     text="Put Wall", size=size.small)
+
+// ── INFO TABLE (TOP LEFT with enhanced metrics) ──────────────────────────────
+var table t = table.new(position.top_left, 2, 13,
+     bgcolor=color.new(color.black, 20),
+     border_color=color.new(color.gray, 60), border_width=1,
+     frame_color=color.new(color.blue, 40), frame_width=2)
+
+if barstate.islast
+    regime      = netGEXneg ? "NEGATIVE (Volatile)" : "POSITIVE (Mean-Rev)"
+    regimeColor = netGEXneg ? color.new(#ff1744, 40) : color.new(#00e676, 40)
+    zeroPos     = zeroAboveSpot ? "Above Spot (Bearish)" : "Below Spot (Bullish)"
+    zeroColor   = zeroAboveSpot ? color.new(#ff6d00, 40) : color.new(#69f0ae, 40)
+
+    distCallWall = callWall - close
+    distPutWall  = close - putWall
+    distZeroGamma = math.abs(close - zeroGamma)
+    distCallStrike = close - highStrike
+    distPutStrike = close - highPutStr
+
+    inCorridor = inGammaCorridor ? "✓ IN CORRIDOR" : "⚠ OUT OF RANGE"
+    corridorColor = inGammaCorridor ? color.new(#00e676, 40) : color.new(#ff6d00, 40)
+
+    nearestSupport = distPutWall < distCallWall ? "Put Wall (" + str.tostring(distPutWall, priceFmt) + ")" : "Call Wall (" + str.tostring(distCallWall, priceFmt) + ")"
+
+    table.cell(t, 0, 0, "S&P 500 GEX",          bgcolor=color.new(#1565c0,40), text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(t, 1, 0, chartSymbol,            bgcolor=color.new(#1565c0,40), text_color=color.gray,  text_size=size.tiny,  text_halign=text.align_right)
+
+    table.cell(t, 0, 1, "Price",                text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 1, str.tostring(close, priceFmt), text_color=color.yellow, text_size=size.small)
+
+    table.cell(t, 0, 2, "Status",               text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 2, inCorridor,             bgcolor=corridorColor,  text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 3, "Regime",               text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 3, regime,                 bgcolor=regimeColor,    text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 4, "Bias",                 text_color=color.gray,  text_size=size.tiny)
+    biasText  = netGEXneg and zeroAboveSpot ? "BEARISH ↓" : "BULLISH ↑"
+    biasColor = netGEXneg and zeroAboveSpot ? color.new(#ff1744,30) : color.new(#00e676,30)
+    table.cell(t, 1, 4, biasText,               bgcolor=biasColor,      text_color=color.white, text_size=size.small)
+
+    table.cell(t, 0, 5, "Zero Gamma",           text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 5, str.tostring(zeroGamma, priceFmt), bgcolor=zeroColor, text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 6, "Call Wall",            text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(callWall, priceFmt) + " +" + str.tostring(distCallWall, priceFmt), bgcolor=color.new(#00e676,50), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 7, "Put Wall",             text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(putWall, priceFmt) + " -" + str.tostring(distPutWall, priceFmt), bgcolor=color.new(#ff1744,50), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 8, "Call Strike",          text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 8, str.tostring(highStrike, priceFmt) + " +" + str.tostring(distCallStrike, priceFmt), bgcolor=color.new(#69f0ae,50), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 9, "Put Strike",           text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 9, str.tostring(highPutStr, priceFmt) + " -" + str.tostring(distPutStrike, priceFmt), bgcolor=color.new(#ff6d00,50), text_color=color.white, text_size=size.tiny)
+
+    table.cell(t, 0, 10, "Dist to 0Γ",         text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 10, str.tostring(distZeroGamma, priceFmt) + " pts", text_color=color.yellow, text_size=size.tiny)
+
+    table.cell(t, 0, 11, "Nearest Support",    text_color=color.gray,  text_size=size.tiny)
+    table.cell(t, 1, 11, nearestSupport,       text_color=color.orange, text_size=size.tiny)
+
+    table.cell(t, 0, 12, "Volume",             text_color=color.gray,  text_size=size.tiny)
+    volStatus = volume > volSMA ? "Above Avg ↑" : "Below Avg ↓"
+    volColor = volume > volSMA ? color.new(#00e676,30) : color.new(#ff6d00,30)
+    table.cell(t, 1, 12, volStatus,            bgcolor=volColor,       text_color=color.white, text_size=size.tiny)
+
+// ── ALERTS ───────────────────────────────────────────────────────────────────
+alertcondition(bearSignal, "GEX SELL Signal", "GEX: SELL signal - consider short")
+alertcondition(bullSignal, "GEX BUY Signal",  "GEX: BUY signal - consider long")
+alertcondition(nearPutWall,"GEX Put Wall",    "Approaching Put Wall - potential acceleration zone")
