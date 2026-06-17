@@ -72,10 +72,11 @@ var int   frvp_session_bars = 0
 var int   session_start_time = na
 var bool  frvp_session_done = false
 
-// Detect 15-min session boundary (when minute moves past session_min boundary)
-bool is_new_frvp_session = na(session_start_time) or
-     (ny_minute >= frvp_session_min and ny_minute[1] < frvp_session_min) or
-     (ny_hour != ny_hour[1])
+// Detect 15-min session boundary (resets every N minutes or on new hour)
+int minutes_since_hour = ny_minute
+int session_number = int(minutes_since_hour / frvp_session_min)
+int prev_session_number = int(minute(time[1], "America/New_York") / frvp_session_min)
+bool is_new_frvp_session = session_number != prev_session_number or ny_hour != ny_hour[1]
 
 if is_new_day
     frvp_session_high := na
@@ -86,22 +87,22 @@ if is_new_day
     frvp_session_done := false
 
 if is_new_frvp_session and in_trade_window
-    session_start_time := time
     frvp_session_high := high
     frvp_session_low  := low
     frvp_session_vol  := volume
     frvp_session_bars := 1
     frvp_session_done := false
-else if not is_new_frvp_session and in_trade_window and not na(session_start_time)
+    session_start_time := time
+else if in_trade_window and not na(session_start_time)
     frvp_session_high := math.max(frvp_session_high, high)
     frvp_session_low  := math.min(frvp_session_low, low)
     frvp_session_vol  += volume
     frvp_session_bars += 1
+    frvp_session_done := false
 
-// Mark session as done when we move past the 15-min window
-if not is_new_frvp_session and in_trade_window and not na(session_start_time) and not frvp_session_done
-    if ny_minute >= (frvp_session_min + frvp_session_min) or ny_hour != ny_hour[1]
-        frvp_session_done := true
+// Mark session as done: trigger on next candle after session boundary
+if is_new_frvp_session and not na(session_start_time) and barstate.isconfirmed
+    frvp_session_done := true
 
 // Simple VAL/VAH calculation: VAL = session_low + (session_high - session_low) * percentile/100
 float frvp_range = (not na(frvp_session_high) and not na(frvp_session_low)) ?
@@ -119,8 +120,8 @@ float vwap_val = ta.vwap(hlc3)
 bool vwap_rising  = vwap_val > vwap_val[vwap_slope_len]
 bool vwap_falling = vwap_val < vwap_val[vwap_slope_len]
 
-bool bullish_bias = frvp_session_done and close > vwap_val and vwap_rising  and close > frvp_vah
-bool bearish_bias = frvp_session_done and close < vwap_val and vwap_falling and close < frvp_val
+bool bullish_bias = close > vwap_val and vwap_rising
+bool bearish_bias = close < vwap_val and vwap_falling
 
 // ════════════════════════════════════════════════════════════════════════
 //  RELATIVE VOLUME
@@ -154,10 +155,10 @@ bool breakout_up_val   = frvp_session_done and close > frvp_session_high
 bool breakout_down_val = frvp_session_done and close < frvp_val
 
 // Stop distance check: stop = FRVP VAH (for longs) or FRVP VAL (for shorts)
-float long_risk_pts  = close - frvp_vah
-float short_risk_pts = frvp_val - close
-bool  long_stop_ok  = not na(frvp_vah) and long_risk_pts > 0  and (long_risk_pts / close * 100)  <= max_stop_pct
-bool  short_stop_ok = not na(frvp_val) and short_risk_pts > 0 and (short_risk_pts / close * 100) <= max_stop_pct
+float long_risk_pts  = frvp_vah - close
+float short_risk_pts = close - frvp_val
+bool  long_stop_ok  = not na(frvp_vah) and long_risk_pts >= 0  and (long_risk_pts / close * 100)  <= max_stop_pct
+bool  short_stop_ok = not na(frvp_val) and short_risk_pts >= 0 and (short_risk_pts / close * 100) <= max_stop_pct
 
 bool long_signal = (in_trade_window and bullish_bias and breakout_up_val and vol_expansion and
                     closed_upper_half and not long_taken_today and strategy.position_size == 0 and
