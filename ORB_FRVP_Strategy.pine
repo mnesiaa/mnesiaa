@@ -1,0 +1,351 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+
+//@version=6
+strategy(
+     title                    = "FRVP (15min) + VWAP + RelVol Continuation — NQ/ES",
+     shorttitle               = "FRVPVWAPRV",
+     overlay                  = true,
+     pyramiding               = 0,
+     default_qty_type         = strategy.fixed,
+     default_qty_value        = 1,
+     initial_capital          = 50000,
+     currency                 = currency.USD,
+     commission_type          = strategy.commission.cash_per_contract,
+     commission_value         = 2.25,
+     slippage                 = 1,
+     calc_on_every_tick       = false,
+     process_orders_on_close  = true,
+     max_lines_count          = 500,
+     max_labels_count         = 200)
+
+// ════════════════════════════════════════════════════════════════════════
+//  INPUTS
+// ════════════════════════════════════════════════════════════════════════
+var g_frvp = "FRVP (15min Session)"
+var g_sess = "Session Window"
+var g_vol  = "Relative Volume"
+var g_vwap = "VWAP Bias"
+var g_risk = "Risk"
+var g_disp = "Display"
+
+trade_start_h = input.int(9,  "Trading Start Hour (NY)", minval = 0, maxval = 23, group = g_sess)
+trade_start_m = input.int(30, "Trading Start Min",       minval = 0, maxval = 59, group = g_sess)
+trade_end_h   = input.int(12, "Trading End Hour (NY)",   minval = 0, maxval = 23, group = g_sess)
+trade_end_m   = input.int(0,  "Trading End Min",         minval = 0, maxval = 59, group = g_sess)
+
+frvp_session_min = input.int(15, "FRVP Session Length (min)", minval = 5, step = 5, group = g_frvp)
+val_percentile = input.float(30.0, "VAL Percentile (0-50)", minval = 0, maxval = 50, step = 5, group = g_frvp)
+
+relvol_len    = input.int(20,  "RelVol Average Length", minval = 5,  group = g_vol)
+relvol_thresh = input.float(1.5, "Min RelVol for Entry", minval = 1.0, step = 0.1, group = g_vol)
+
+vwap_slope_len = input.int(5, "VWAP Slope Lookback (bars)", minval = 1, group = g_vwap)
+
+max_stop_pct  = input.float(0.75, "Max Stop Distance (% of price)", minval = 0.05, step = 0.05, group = g_risk)
+contracts     = input.int(1, "Contracts per Entry", minval = 1, group = g_risk)
+
+show_frvp_lines = input.bool(true, "Show FRVP VAL/VAH/HIGH",  group = g_disp)
+show_trade_lines = input.bool(true, "Show Entry/SL/TP Lines", group = g_disp)
+show_stats    = input.bool(true, "Show Backtest Stats Table", group = g_disp)
+
+// ════════════════════════════════════════════════════════════════════════
+//  TIME ENGINE — anchored explicitly to America/New_York
+// ════════════════════════════════════════════════════════════════════════
+ny_hour   = hour(time, "America/New_York")
+ny_minute = minute(time, "America/New_York")
+ny_hhmm   = ny_hour * 100 + ny_minute
+
+trade_start_hhmm = trade_start_h * 100 + trade_start_m
+trade_end_hhmm   = trade_end_h * 100 + trade_end_m
+
+in_trade_window = ny_hhmm >= trade_start_hhmm and ny_hhmm < trade_end_hhmm
+
+is_new_day = dayofmonth(time, "America/New_York") != dayofmonth(time[1], "America/New_York")
+
+// ════════════════════════════════════════════════════════════════════════
+//  FRVP (15-MIN SESSION) — track high, low, and volume
+// ════════════════════════════════════════════════════════════════════════
+var float frvp_session_high = na
+var float frvp_session_low  = na
+var float frvp_session_vol  = 0.0
+var int   frvp_session_bars = 0
+var int   session_start_time = na
+var bool  frvp_session_done = false
+
+// Detect 15-min session boundary (when minute moves past session_min boundary)
+bool is_new_frvp_session = na(session_start_time) or
+     (ny_minute >= frvp_session_min and ny_minute[1] < frvp_session_min) or
+     (ny_hour != ny_hour[1])
+
+if is_new_day
+    frvp_session_high := na
+    frvp_session_low  := na
+    frvp_session_vol  := 0.0
+    frvp_session_bars := 0
+    session_start_time := na
+    frvp_session_done := false
+
+if is_new_frvp_session and in_trade_window
+    session_start_time := time
+    frvp_session_high := high
+    frvp_session_low  := low
+    frvp_session_vol  := volume
+    frvp_session_bars := 1
+    frvp_session_done := false
+else if not is_new_frvp_session and in_trade_window and not na(session_start_time)
+    frvp_session_high := math.max(frvp_session_high, high)
+    frvp_session_low  := math.min(frvp_session_low, low)
+    frvp_session_vol  += volume
+    frvp_session_bars += 1
+
+// Mark session as done when we move past the 15-min window
+if not is_new_frvp_session and in_trade_window and not na(session_start_time) and not frvp_session_done
+    if ny_minute >= (frvp_session_min + frvp_session_min) or ny_hour != ny_hour[1]
+        frvp_session_done := true
+
+// Simple VAL/VAH calculation: VAL = session_low + (session_high - session_low) * percentile/100
+float frvp_range = (not na(frvp_session_high) and not na(frvp_session_low)) ?
+     frvp_session_high - frvp_session_low : 0.0
+float frvp_val = (not na(frvp_session_low)) ?
+     frvp_session_low + frvp_range * (val_percentile / 100.0) : na
+float frvp_vah = (not na(frvp_session_high)) ?
+     frvp_session_high - frvp_range * (val_percentile / 100.0) : na
+
+// ════════════════════════════════════════════════════════════════════════
+//  VWAP BIAS — session VWAP (resets daily), slope over N bars for direction.
+// ════════════════════════════════════════════════════════════════════════
+float vwap_val = ta.vwap(hlc3)
+
+bool vwap_rising  = vwap_val > vwap_val[vwap_slope_len]
+bool vwap_falling = vwap_val < vwap_val[vwap_slope_len]
+
+bool bullish_bias = frvp_session_done and close > vwap_val and vwap_rising  and close > frvp_vah
+bool bearish_bias = frvp_session_done and close < vwap_val and vwap_falling and close < frvp_val
+
+// ════════════════════════════════════════════════════════════════════════
+//  RELATIVE VOLUME
+// ════════════════════════════════════════════════════════════════════════
+float avg_vol = ta.sma(volume, relvol_len)
+float rel_vol = avg_vol > 0 ? volume / avg_vol : 0.0
+bool  vol_expansion = avg_vol > 0 and rel_vol > relvol_thresh
+
+// ════════════════════════════════════════════════════════════════════════
+//  BREAK-CANDLE STRUCTURE — close in upper/lower 50% of its own range
+// ════════════════════════════════════════════════════════════════════════
+float bar_range   = high - low
+float close_pos   = bar_range > 0 ? (close - low) / bar_range : 0.5
+bool  closed_upper_half = close_pos >= 0.5
+bool  closed_lower_half = close_pos <= 0.5
+
+// ════════════════════════════════════════════════════════════════════════
+//  ONE-TRADE-PER-DIRECTION-PER-DAY STATE
+// ════════════════════════════════════════════════════════════════════════
+var bool long_taken_today  = false
+var bool short_taken_today = false
+
+if is_new_day
+    long_taken_today  := false
+    short_taken_today := false
+
+// ════════════════════════════════════════════════════════════════════════
+//  ENTRY CONDITIONS — BREAK OF VAL (bearish) or HIGH (bullish)
+// ════════════════════════════════════════════════════════════════════════
+bool breakout_up_val   = frvp_session_done and close > frvp_session_high
+bool breakout_down_val = frvp_session_done and close < frvp_val
+
+// Stop distance check: stop = FRVP VAH (for longs) or FRVP VAL (for shorts)
+float long_risk_pts  = close - frvp_vah
+float short_risk_pts = frvp_val - close
+bool  long_stop_ok  = not na(frvp_vah) and long_risk_pts > 0  and (long_risk_pts / close * 100)  <= max_stop_pct
+bool  short_stop_ok = not na(frvp_val) and short_risk_pts > 0 and (short_risk_pts / close * 100) <= max_stop_pct
+
+bool long_signal = (in_trade_window and bullish_bias and breakout_up_val and vol_expansion and
+                    closed_upper_half and not long_taken_today and strategy.position_size == 0 and
+                    long_stop_ok and not (bearish_bias and breakout_down_val))
+
+bool short_signal = (in_trade_window and bearish_bias and breakout_down_val and vol_expansion and
+                     closed_lower_half and not short_taken_today and strategy.position_size == 0 and
+                     short_stop_ok and not (bullish_bias and breakout_up_val))
+
+// ════════════════════════════════════════════════════════════════════════
+//  TRADE STATE — entry/stop/targets, partial-TP tracking
+// ════════════════════════════════════════════════════════════════════════
+var float entry_price = na
+var float stop_price  = na
+var float tp1_price   = na
+var float tp2_price   = na
+var float risk_pts    = na
+var float risk_cash   = na
+var bool  tp1_hit      = false
+var int   trade_dir    = 0   // 1 = long, -1 = short
+var float prev_pos_size = 0.0
+
+if long_signal
+    entry_price := close
+    stop_price  := frvp_vah
+    risk_pts    := entry_price - stop_price
+    tp1_price   := entry_price + risk_pts
+    tp2_price   := entry_price + risk_pts * 2
+    risk_cash   := risk_pts * syminfo.pointvalue * contracts
+    tp1_hit      := false
+    trade_dir    := 1
+    long_taken_today := true
+    strategy.entry("Long", strategy.long, qty = contracts)
+
+if short_signal
+    entry_price := close
+    stop_price  := frvp_val
+    risk_pts    := stop_price - entry_price
+    tp1_price   := entry_price - risk_pts
+    tp2_price   := entry_price - risk_pts * 2
+    risk_cash   := risk_pts * syminfo.pointvalue * contracts
+    tp1_hit      := false
+    trade_dir    := -1
+    short_taken_today := true
+    strategy.entry("Short", strategy.short, qty = contracts)
+
+// Detect TP1 partial fill: position size shrank but is still open
+if strategy.position_size != 0 and prev_pos_size != 0 and
+     math.abs(strategy.position_size) < math.abs(prev_pos_size) and not tp1_hit
+    tp1_hit := true
+
+// ════════════════════════════════════════════════════════════════════════
+//  EXIT MANAGEMENT
+//    TP1 leg : 50% of position, limit = TP1, stop = original stop
+//    TP2 leg : remaining position, limit = TP2,
+//              stop = original stop until TP1 fills, then breakeven
+// ════════════════════════════════════════════════════════════════════════
+if trade_dir == 1 and strategy.position_size > 0
+    if not tp1_hit
+        strategy.exit("TP1-L", from_entry = "Long", qty_percent = 50, limit = tp1_price, stop = stop_price)
+    strategy.exit("TP2-L", from_entry = "Long", qty_percent = 100, limit = tp2_price,
+         stop = tp1_hit ? entry_price : stop_price)
+
+if trade_dir == -1 and strategy.position_size < 0
+    if not tp1_hit
+        strategy.exit("TP1-S", from_entry = "Short", qty_percent = 50, limit = tp1_price, stop = stop_price)
+    strategy.exit("TP2-S", from_entry = "Short", qty_percent = 100, limit = tp2_price,
+         stop = tp1_hit ? entry_price : stop_price)
+
+// Clear trade state once fully flat
+if strategy.position_size == 0
+    if not long_signal and not short_signal
+        trade_dir   := 0
+        entry_price := na
+        stop_price  := na
+        tp1_price   := na
+        tp2_price   := na
+
+prev_pos_size := strategy.position_size
+
+// ════════════════════════════════════════════════════════════════════════
+//  R-MULTIPLE TRACKING (for the stats table)
+// ════════════════════════════════════════════════════════════════════════
+var int   closed_count   = 0
+var float sum_r          = 0.0
+var float locked_risk_cash = na
+
+if (long_signal or short_signal)
+    locked_risk_cash := risk_cash
+
+if strategy.closedtrades > closed_count
+    float last_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    float r = (not na(locked_risk_cash) and locked_risk_cash > 0) ? last_profit / locked_risk_cash : 0.0
+    sum_r        += r
+    closed_count := strategy.closedtrades
+
+float avg_r = closed_count > 0 ? sum_r / closed_count : 0.0
+
+// ════════════════════════════════════════════════════════════════════════
+//  VISUALS — FRVP levels, entry/SL/TP lines, BUY/SELL labels
+// ════════════════════════════════════════════════════════════════════════
+plot(show_frvp_lines and frvp_session_done ? frvp_session_high : na, "FRVP HIGH", color.new(color.lime, 0),   2, plot.style_linebr)
+plot(show_frvp_lines and frvp_session_done ? frvp_vah  : na, "FRVP VAH",  color.new(color.blue, 40),  1, plot.style_linebr)
+plot(show_frvp_lines and frvp_session_done ? frvp_val  : na, "FRVP VAL",  color.new(color.red, 40),   1, plot.style_linebr)
+plot(show_frvp_lines and frvp_session_done ? frvp_session_low : na, "FRVP LOW", color.new(color.orange, 0),  2, plot.style_linebr)
+plot(vwap_val, "VWAP", color.new(color.yellow, 0), 2)
+
+var line entry_line = na
+var line stop_line  = na
+var line tp1_line   = na
+var line tp2_line   = na
+var label entry_lbl = na
+var label stop_lbl  = na
+var label tp1_lbl   = na
+var label tp2_lbl   = na
+
+if barstate.isfirst
+    entry_line := line.new(bar_index, close, bar_index, close, color = color.new(color.white, 30), style = line.style_dotted)
+    stop_line  := line.new(bar_index, close, bar_index, close, color = color.new(color.red,   30), style = line.style_dashed)
+    tp1_line   := line.new(bar_index, close, bar_index, close, color = color.new(color.green, 40), style = line.style_dotted)
+    tp2_line   := line.new(bar_index, close, bar_index, close, color = color.new(color.green, 20), style = line.style_dashed)
+    entry_lbl  := label.new(bar_index, close, "", style = label.style_label_left, color = color.new(color.white, 40), textcolor = color.black, size = size.tiny)
+    stop_lbl   := label.new(bar_index, close, "", style = label.style_label_left, color = color.new(color.red,   40), textcolor = color.white, size = size.tiny)
+    tp1_lbl    := label.new(bar_index, close, "", style = label.style_label_left, color = color.new(color.green, 50), textcolor = color.white, size = size.tiny)
+    tp2_lbl    := label.new(bar_index, close, "", style = label.style_label_left, color = color.new(color.green, 30), textcolor = color.white, size = size.tiny)
+
+if show_trade_lines and strategy.position_size != 0 and not na(entry_price)
+    int ext = bar_index + 20
+    line.set_xy1(entry_line, bar_index, entry_price)
+    line.set_xy2(entry_line, ext, entry_price)
+    line.set_xy1(stop_line, bar_index, stop_price)
+    line.set_xy2(stop_line, ext, stop_price)
+    line.set_xy1(tp1_line, bar_index, tp1_price)
+    line.set_xy2(tp1_line, ext, tp1_price)
+    line.set_xy1(tp2_line, bar_index, tp2_price)
+    line.set_xy2(tp2_line, ext, tp2_price)
+
+    label.set_xy(entry_lbl, ext, entry_price)
+    label.set_text(entry_lbl, "Entry " + str.tostring(entry_price, format.mintick))
+    label.set_xy(stop_lbl, ext, stop_price)
+    label.set_text(stop_lbl, "SL " + str.tostring(stop_price, format.mintick))
+    label.set_xy(tp1_lbl, ext, tp1_price)
+    label.set_text(tp1_lbl, "TP1 " + str.tostring(tp1_price, format.mintick) + (tp1_hit ? " ✓" : ""))
+    label.set_xy(tp2_lbl, ext, tp2_price)
+    label.set_text(tp2_lbl, "TP2 " + str.tostring(tp2_price, format.mintick))
+else if strategy.position_size == 0
+    line.set_xy1(entry_line, bar_index, close)
+    line.set_xy2(entry_line, bar_index, close)
+    line.set_xy1(stop_line, bar_index, close)
+    line.set_xy2(stop_line, bar_index, close)
+    line.set_xy1(tp1_line, bar_index, close)
+    line.set_xy2(tp1_line, bar_index, close)
+    line.set_xy1(tp2_line, bar_index, close)
+    line.set_xy2(tp2_line, bar_index, close)
+    label.set_text(entry_lbl, "")
+    label.set_text(stop_lbl, "")
+    label.set_text(tp1_lbl, "")
+    label.set_text(tp2_lbl, "")
+
+plotshape(long_signal,  "BUY",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(short_signal, "SELL", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
+
+// ════════════════════════════════════════════════════════════════════════
+//  BACKTEST STATS TABLE
+// ════════════════════════════════════════════════════════════════════════
+if show_stats and barstate.islast
+    var table stats = table.new(position.bottom_right, 2, 6,
+         bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 50), border_width = 1)
+
+    float gross_profit = strategy.grossprofit
+    float gross_loss    = strategy.grossloss
+    float profit_factor = gross_loss > 0 ? gross_profit / gross_loss : na
+    float win_rate       = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0.0
+
+    table.cell(stats, 0, 0, "BACKTEST STATS", text_color = color.white, bgcolor = color.new(color.blue, 20))
+    table.merge_cells(stats, 0, 0, 1, 0)
+
+    table.cell(stats, 0, 1, "Win Rate",       text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 1, str.tostring(win_rate, "#.#") + "%", text_color = win_rate >= 50 ? color.green : color.red, text_size = size.small)
+
+    table.cell(stats, 0, 2, "Profit Factor",  text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 2, na(profit_factor) ? "—" : str.tostring(profit_factor, "#.##"), text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 3, "Avg R Multiple", text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 3, str.tostring(avg_r, "#.##") + "R", text_color = avg_r >= 0 ? color.green : color.red, text_size = size.small)
+
+    table.cell(stats, 0, 4, "Max Drawdown",   text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 4, str.tostring(strategy.max_drawdown, "#.##"), text_color = color.orange, text_size = size.small)
+
+    table.cell(stats, 0, 5, "Total Trades",   text_color = color.silver, text_size = size.small)
+    table.cell(stats, 1, 5, str.tostring(strategy.closedtrades), text_color = color.white, text_size = size.small)
