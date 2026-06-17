@@ -97,9 +97,9 @@ if is_new_frvp_session
     if not na(frvp_session_high) and not na(frvp_session_low)
         completed_high := frvp_session_high
         completed_low := frvp_session_low
-        float range = completed_high - completed_low
-        completed_val := completed_low + range * (val_percentile / 100.0)
-        completed_vah := completed_high - range * (val_percentile / 100.0)
+        float session_range = completed_high - completed_low
+        completed_val := completed_low + session_range * (val_percentile / 100.0)
+        completed_vah := completed_high - session_range * (val_percentile / 100.0)
         frvp_session_done := true
     // Start new session
     frvp_session_high := high
