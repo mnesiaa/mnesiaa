@@ -69,48 +69,56 @@ var float frvp_session_high = na
 var float frvp_session_low  = na
 var float frvp_session_vol  = 0.0
 var int   frvp_session_bars = 0
-var int   session_start_time = na
-var bool  frvp_session_done = false
+var bool  frvp_session_done = true
 
-// Detect 15-min session boundary (resets every N minutes or on new hour)
-int minutes_since_hour = ny_minute
-int session_number = int(minutes_since_hour / frvp_session_min)
+var float completed_high = na
+var float completed_low = na
+var float completed_val = na
+var float completed_vah = na
+
+// Detect 15-min session boundary
+int session_number = int(ny_minute / frvp_session_min)
 int prev_session_number = int(minute(time[1], "America/New_York") / frvp_session_min)
-bool is_new_frvp_session = session_number != prev_session_number or ny_hour != ny_hour[1]
+bool is_new_frvp_session = (session_number != prev_session_number) or (ny_hour != ny_hour[1])
 
 if is_new_day
     frvp_session_high := na
     frvp_session_low  := na
     frvp_session_vol  := 0.0
     frvp_session_bars := 0
-    session_start_time := na
-    frvp_session_done := false
+    completed_high := na
+    completed_low := na
+    completed_val := na
+    completed_vah := na
+    frvp_session_done := true
 
-if is_new_frvp_session and in_trade_window
+if is_new_frvp_session
+    // Save completed session for entries
+    if not na(frvp_session_high) and not na(frvp_session_low)
+        completed_high := frvp_session_high
+        completed_low := frvp_session_low
+        float range = completed_high - completed_low
+        completed_val := completed_low + range * (val_percentile / 100.0)
+        completed_vah := completed_high - range * (val_percentile / 100.0)
+        frvp_session_done := true
+    // Start new session
     frvp_session_high := high
     frvp_session_low  := low
     frvp_session_vol  := volume
     frvp_session_bars := 1
-    frvp_session_done := false
-    session_start_time := time
-else if in_trade_window and not na(session_start_time)
-    frvp_session_high := math.max(frvp_session_high, high)
-    frvp_session_low  := math.min(frvp_session_low, low)
-    frvp_session_vol  += volume
-    frvp_session_bars += 1
-    frvp_session_done := false
+else
+    // Continue current session
+    if in_trade_window
+        frvp_session_high := math.max(nz(frvp_session_high, high), high)
+        frvp_session_low  := math.min(nz(frvp_session_low, low), low)
+        frvp_session_vol  += volume
+        frvp_session_bars += 1
 
-// Mark session as done: trigger on next candle after session boundary
-if is_new_frvp_session and not na(session_start_time) and barstate.isconfirmed
-    frvp_session_done := true
-
-// Simple VAL/VAH calculation: VAL = session_low + (session_high - session_low) * percentile/100
-float frvp_range = (not na(frvp_session_high) and not na(frvp_session_low)) ?
-     frvp_session_high - frvp_session_low : 0.0
-float frvp_val = (not na(frvp_session_low)) ?
-     frvp_session_low + frvp_range * (val_percentile / 100.0) : na
-float frvp_vah = (not na(frvp_session_high)) ?
-     frvp_session_high - frvp_range * (val_percentile / 100.0) : na
+// Use completed session levels for entries
+float frvp_val = completed_val
+float frvp_vah = completed_vah
+float frvp_session_high_plot = completed_high
+float frvp_session_low_plot = completed_low
 
 // ════════════════════════════════════════════════════════════════════════
 //  VWAP BIAS — session VWAP (resets daily), slope over N bars for direction.
@@ -151,8 +159,8 @@ if is_new_day
 // ════════════════════════════════════════════════════════════════════════
 //  ENTRY CONDITIONS — BREAK OF VAL (bearish) or HIGH (bullish)
 // ════════════════════════════════════════════════════════════════════════
-bool breakout_up_val   = frvp_session_done and close > frvp_session_high
-bool breakout_down_val = frvp_session_done and close < frvp_val
+bool breakout_up_val   = frvp_session_done and not na(completed_high) and close > completed_high
+bool breakout_down_val = frvp_session_done and not na(completed_val) and close < completed_val
 
 // Stop distance check: stop = FRVP VAH (for longs) or FRVP VAL (for shorts)
 float long_risk_pts  = frvp_vah - close
@@ -260,10 +268,10 @@ float avg_r = closed_count > 0 ? sum_r / closed_count : 0.0
 // ════════════════════════════════════════════════════════════════════════
 //  VISUALS — FRVP levels, entry/SL/TP lines, BUY/SELL labels
 // ════════════════════════════════════════════════════════════════════════
-plot(show_frvp_lines and frvp_session_done ? frvp_session_high : na, "FRVP HIGH", color.new(color.lime, 0),   2, plot.style_linebr)
+plot(show_frvp_lines and frvp_session_done ? frvp_session_high_plot : na, "FRVP HIGH", color.new(color.lime, 0),   2, plot.style_linebr)
 plot(show_frvp_lines and frvp_session_done ? frvp_vah  : na, "FRVP VAH",  color.new(color.blue, 40),  1, plot.style_linebr)
 plot(show_frvp_lines and frvp_session_done ? frvp_val  : na, "FRVP VAL",  color.new(color.red, 40),   1, plot.style_linebr)
-plot(show_frvp_lines and frvp_session_done ? frvp_session_low : na, "FRVP LOW", color.new(color.orange, 0),  2, plot.style_linebr)
+plot(show_frvp_lines and frvp_session_done ? frvp_session_low_plot : na, "FRVP LOW", color.new(color.orange, 0),  2, plot.style_linebr)
 plot(vwap_val, "VWAP", color.new(color.yellow, 0), 2)
 
 var line entry_line = na
