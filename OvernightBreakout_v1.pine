@@ -1,0 +1,461 @@
+//@version=6
+indicator(
+     title     = "Overnight Consolidation Breakout v1.0",
+     shorttitle = "OCB v1.0",
+     overlay   = true,
+     max_lines_count  = 200,
+     max_labels_count = 200,
+     max_boxes_count  = 100)
+
+// ===========================================================
+// HELPER FUNCTIONS
+// ===========================================================
+
+fmtP(float v) =>
+    str.tostring(math.round(v, 2))
+
+fmtOk(bool b) =>
+    b ? "[Y]" : "[N]"
+
+// ===========================================================
+// INPUTS
+// ===========================================================
+
+// -- Overnight Session (defines the consolidation range) --
+i_onStart    = input.int(1800, "Overnight Start HHMM (EST)", group = "Overnight Session",
+     tooltip = "Start of range that defines value area. Default 18:00 = futures open.")
+i_onEnd      = input.int(930,  "Overnight End HHMM (EST)",   group = "Overnight Session",
+     tooltip = "End of overnight range / regular session open. Default 09:30.")
+
+// -- Volume Confirmation --
+i_volLookback = input.int(10,   "Vol Avg Lookback (candles)", minval = 5, maxval = 50,  group = "Volume")
+i_volMinPct   = input.float(20, "Vol Spike Min % above avg",  minval = 5, maxval = 200, group = "Volume",
+     tooltip = "Breakout candle must exceed average volume by at least this percentage.")
+
+// -- Stochastic --
+i_stochK     = input.int(14, "Stoch K Length",    minval = 3,  group = "Stochastic")
+i_stochD     = input.int(3,  "Stoch D Smoothing", minval = 1,  group = "Stochastic")
+i_stochSmooth= input.int(3,  "Stoch Smoothing",   minval = 1,  group = "Stochastic")
+i_stochLevel = input.int(50, "Stoch Signal Level", minval = 20, maxval = 80, group = "Stochastic",
+     tooltip = "Bull breakout requires Stoch K crossing above this level; bear crossing below.")
+
+// -- ATM / Value Area --
+i_vaExt      = input.int(40, "Zone Extension (bars)", minval = 10, maxval = 200, group = "ATM Value Area",
+     tooltip = "How many bars right to extend the overnight H/L zone lines.")
+i_acceptBars = input.int(3,  "Acceptance Bars",       minval = 1,  maxval = 20,  group = "ATM Value Area",
+     tooltip = "How many consecutive closes above/below the zone count as acceptance.")
+
+// -- Trailing Stop --
+i_atrLen     = input.int(14,   "ATR Length",            minval = 2,  group = "Risk")
+i_trailMult  = input.float(1.5,"ATR Trailing Stop Mult",minval = 0.5, step = 0.25, group = "Risk")
+i_showTrail  = input.bool(true, "Show Trailing Stop Line", group = "Risk")
+
+// -- Visual --
+i_showZones  = input.bool(true,  "Show Overnight H/L Zones",     group = "Visual")
+i_showVolBar = input.bool(true,  "Highlight Volume Spike Candle", group = "Visual")
+i_showStoch  = input.bool(true,  "Show Stoch Signal Markers",     group = "Visual")
+i_showEntry  = input.bool(true,  "Show Entry Labels",             group = "Visual")
+i_showDash   = input.bool(true,  "Show Dashboard",                group = "Visual")
+i_showDebug  = input.bool(false, "Show Condition Debug Table",    group = "Visual")
+
+// ===========================================================
+// TIME HELPERS
+// ===========================================================
+
+barHHMM = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+
+// Overnight session wraps midnight: start > end means it crosses midnight.
+// e.g. 1800 -> 0930 next day.
+inOvernightRange() =>
+    s = i_onStart
+    e = i_onEnd
+    if s > e
+        barHHMM >= s or barHHMM < e
+    else
+        barHHMM >= s and barHHMM < e
+
+inOvernight = inOvernightRange()
+
+// Detect the transition from overnight -> regular session
+// (the first bar AT or after i_onEnd that was previously in the overnight window)
+var bool prevOvernight = false
+overnightClose = prevOvernight and not inOvernight
+prevOvernight := inOvernight
+
+// Detect any new overnight period starting
+var bool prevNotOvernight = true
+overnightOpen = not prevNotOvernight and inOvernight
+prevNotOvernight := not inOvernight
+
+// ===========================================================
+// OVERNIGHT HIGH / LOW  (ATM Value Area)
+// ===========================================================
+
+var float onHigh = na
+var float onLow  = na
+var float lockedHigh = na  // frozen at overnight close, used for rest of day
+var float lockedLow  = na
+
+// Build the overnight range bar-by-bar
+if overnightOpen
+    onHigh := high
+    onLow  := low
+else if inOvernight
+    onHigh := math.max(nz(onHigh, high), high)
+    onLow  := math.min(nz(onLow,  low),  low)
+
+// At the moment overnight ends, lock levels
+if overnightClose
+    lockedHigh := onHigh
+    lockedLow  := onLow
+
+// If we never got a fresh overnight (e.g. first bars of chart), keep last locked
+overnightHigh = nz(lockedHigh, na)
+overnightLow  = nz(lockedLow,  na)
+hasRange      = not na(overnightHigh) and not na(overnightLow)
+
+// ===========================================================
+// BREAKOUT DETECTION
+// ===========================================================
+
+// Price breaks above overnight high
+bullBreakout = hasRange and close > overnightHigh and close[1] <= overnightHigh[1]
+bearBreakout = hasRange and close < overnightLow  and close[1] >= overnightLow[1]
+
+// ===========================================================
+// VOLUME CONFIRMATION
+// ===========================================================
+
+// Rolling average of last N candles (excluding current bar via [1] shift on sma)
+// We use ta.sma over volume[1] so current breakout bar is compared against prior avg
+avgVol        = ta.sma(volume[1], i_volLookback)
+volSpikeThresh = avgVol * (1 + i_volMinPct / 100)
+volConfirm    = volume >= volSpikeThresh
+
+// ===========================================================
+// STOCHASTIC
+// ===========================================================
+
+stochK_raw = ta.stoch(close, high, low, i_stochK)
+stochK     = ta.sma(stochK_raw, i_stochSmooth)
+stochD     = ta.sma(stochK, i_stochD)
+
+// Stoch crosses above/below signal level
+stochBullCross = ta.crossover(stochK,  i_stochLevel)
+stochBearCross = ta.crossunder(stochK, i_stochLevel)
+
+// Allow entry within a window of the stoch cross (don't require same bar)
+stochBullOk = stochK > i_stochLevel and stochK[1] <= i_stochLevel or
+     (stochK > i_stochLevel and ta.barssince(stochBullCross) <= 3)
+stochBearOk = stochK < i_stochLevel and stochK[1] >= i_stochLevel or
+     (stochK < i_stochLevel and ta.barssince(stochBearCross) <= 3)
+
+// ===========================================================
+// ATM THEORY — PRICE ACCEPTANCE
+// ===========================================================
+
+// Track consecutive closes above/below overnight range
+var int  aboveCount = 0
+var int  belowCount = 0
+var bool acceptedAbove = false
+var bool acceptedBelow = false
+
+if hasRange
+    if close > overnightHigh
+        aboveCount += 1
+        belowCount := 0
+    else if close < overnightLow
+        belowCount += 1
+        aboveCount := 0
+    else
+        aboveCount := 0
+        belowCount := 0
+
+    acceptedAbove := aboveCount >= i_acceptBars
+    acceptedBelow := belowCount >= i_acceptBars
+
+// ===========================================================
+// ENTRY SIGNALS — fires on any session/timeframe
+// ===========================================================
+
+longSignal  = bullBreakout and volConfirm and stochBullOk and not inOvernight
+shortSignal = bearBreakout and volConfirm and stochBearOk and not inOvernight
+
+// ===========================================================
+// ATR & TRAILING STOP
+// ===========================================================
+
+atr = ta.atr(i_atrLen)
+
+var float trailStopLong  = na
+var float trailStopShort = na
+var bool  inLong         = false
+var bool  inShort        = false
+
+if longSignal
+    inLong         := true
+    inShort        := false
+    trailStopLong  := close - atr * i_trailMult
+    trailStopShort := na
+
+if inLong and not longSignal
+    trailStopLong := math.max(trailStopLong, close - atr * i_trailMult)
+    if close < trailStopLong
+        inLong := false
+
+if shortSignal
+    inShort        := true
+    inLong         := false
+    trailStopShort := close + atr * i_trailMult
+    trailStopLong  := na
+
+if inShort and not shortSignal
+    trailStopShort := math.min(trailStopShort, close + atr * i_trailMult)
+    if close > trailStopShort
+        inShort := false
+
+// Fallback stop = opposite end of overnight range
+longHardStop  = hasRange ? overnightLow  : na
+shortHardStop = hasRange ? overnightHigh : na
+
+// ===========================================================
+// VISUAL — Overnight H/L Zones
+// ===========================================================
+
+// Draw zone boxes/lines at the moment the overnight session closes
+var box  zoneBox   = na
+var line highLine  = na
+var line lowLine   = na
+
+if i_showZones and overnightClose and hasRange
+    int x0  = bar_index
+    int x1  = bar_index + i_vaExt
+
+    // Delete old lines so they don't stack
+    line.delete(highLine)
+    line.delete(lowLine)
+    box.delete(zoneBox)
+
+    highLine := line.new(x0, overnightHigh, x1, overnightHigh,
+         color = color.new(color.teal, 0), width = 2, style = line.style_solid)
+    lowLine  := line.new(x0, overnightLow,  x1, overnightLow,
+         color = color.new(color.maroon, 0), width = 2, style = line.style_solid)
+    zoneBox  := box.new(x0, overnightHigh, x1, overnightLow,
+         border_color = color.new(color.gray, 80),
+         bgcolor      = color.new(color.blue, 88),
+         border_width = 1)
+
+    label.new(x1, overnightHigh,
+         "ON High: " + fmtP(overnightHigh),
+         color     = color.new(color.teal, 10),
+         textcolor = color.white,
+         style     = label.style_label_left,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+    label.new(x1, overnightLow,
+         "ON Low: " + fmtP(overnightLow),
+         color     = color.new(color.maroon, 10),
+         textcolor = color.white,
+         style     = label.style_label_left,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+// Shade overnight range background
+bgcolor(inOvernight ? color.new(color.navy, 88) : na, title = "Overnight BG")
+
+// ===========================================================
+// VISUAL — Volume spike highlight
+// ===========================================================
+
+bgcolor(i_showVolBar and volConfirm and not inOvernight ?
+     color.new(color.yellow, 85) : na, title = "Vol Spike BG")
+
+// ===========================================================
+// VISUAL — Stochastic crossover markers (on price pane)
+// ===========================================================
+
+plotshape(i_showStoch and stochBullCross and not inOvernight,
+     location = location.belowbar,
+     style    = shape.circle,
+     color    = color.new(color.aqua, 20),
+     size     = size.tiny,
+     title    = "Stoch Bull Cross")
+plotshape(i_showStoch and stochBearCross and not inOvernight,
+     location = location.abovebar,
+     style    = shape.circle,
+     color    = color.new(color.fuchsia, 20),
+     size     = size.tiny,
+     title    = "Stoch Bear Cross")
+
+// ===========================================================
+// VISUAL — Entry signals
+// ===========================================================
+
+plotshape(longSignal,
+     location = location.belowbar,
+     style    = shape.triangleup,
+     color    = color.new(color.lime, 0),
+     size     = size.normal,
+     title    = "Long Entry")
+plotshape(shortSignal,
+     location = location.abovebar,
+     style    = shape.triangledown,
+     color    = color.new(color.red, 0),
+     size     = size.normal,
+     title    = "Short Entry")
+
+if i_showEntry and longSignal
+    label.new(bar_index, low - atr * 0.6,
+         "LONG BREAK\n@ " + fmtP(close) +
+         "\nVol: " + str.tostring(math.round(volume / avgVol * 100, 1)) + "% avg" +
+         "\nStoch K: " + str.tostring(math.round(stochK, 1)) +
+         "\nStop: " + fmtP(longHardStop),
+         color     = color.new(color.lime, 10),
+         textcolor = color.black,
+         style     = label.style_label_up,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+if i_showEntry and shortSignal
+    label.new(bar_index, high + atr * 0.6,
+         "SHORT BREAK\n@ " + fmtP(close) +
+         "\nVol: " + str.tostring(math.round(volume / avgVol * 100, 1)) + "% avg" +
+         "\nStoch K: " + str.tostring(math.round(stochK, 1)) +
+         "\nStop: " + fmtP(shortHardStop),
+         color     = color.new(color.red, 10),
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+// ===========================================================
+// VISUAL — Trailing stop line
+// ===========================================================
+
+plot(i_showTrail and inLong  ? trailStopLong  : na, "Trail Stop (Long)",
+     color = color.new(color.lime, 20), style = plot.style_linebr, linewidth = 2)
+plot(i_showTrail and inShort ? trailStopShort : na, "Trail Stop (Short)",
+     color = color.new(color.red,  20), style = plot.style_linebr, linewidth = 2)
+
+// ===========================================================
+// VISUAL — ATM acceptance markers
+// ===========================================================
+
+plotshape(acceptedAbove and not acceptedAbove[1],
+     location = location.abovebar,
+     style    = shape.labelup,
+     color    = color.new(color.teal, 0),
+     textcolor= color.white,
+     text     = "ACCEPT\nABOVE",
+     size     = size.tiny,
+     title    = "ATM Accept Above")
+plotshape(acceptedBelow and not acceptedBelow[1],
+     location = location.belowbar,
+     style    = shape.labeldown,
+     color    = color.new(color.maroon, 0),
+     textcolor= color.white,
+     text     = "ACCEPT\nBELOW",
+     size     = size.tiny,
+     title    = "ATM Accept Below")
+
+// ===========================================================
+// DASHBOARD
+// ===========================================================
+
+if i_showDash
+    string sesStr = inOvernight ? "OVERNIGHT" : "REGULAR"
+    string hlStr  = hasRange
+         ? "H " + fmtP(overnightHigh) + " / L " + fmtP(overnightLow)
+         : "Building..."
+    string posStr = close > overnightHigh ? "ABOVE RANGE"
+         : close < overnightLow  ? "BELOW RANGE"
+         : "INSIDE RANGE"
+    string volStr = volConfirm
+         ? "SPIKE (" + str.tostring(math.round(volume / math.max(avgVol, 1) * 100, 0)) + "% avg)"
+         : "Normal (" + str.tostring(math.round(volume / math.max(avgVol, 1) * 100, 0)) + "% avg)"
+    string stochStr = str.tostring(math.round(stochK, 1)) +
+         (stochBullCross ? " ^BULL CROSS" : stochBearCross ? " vBEAR CROSS" : "")
+    string atmStr = acceptedAbove ? "ACCEPTED ABOVE (" + str.tostring(aboveCount) + "b)"
+         : acceptedBelow ? "ACCEPTED BELOW (" + str.tostring(belowCount) + "b)"
+         : "Pending (" + (close > overnightHigh ? str.tostring(aboveCount) : str.tostring(belowCount)) + "b)"
+    string trailStr = inLong  ? "LONG  stop " + fmtP(trailStopLong)
+         : inShort ? "SHORT stop " + fmtP(trailStopShort)
+         : "FLAT"
+
+    string dashText =
+         "=== OCB v1.0 ===\n" +
+         "Session : " + sesStr + "\n" +
+         "ON Range: " + hlStr  + "\n" +
+         "Price   : " + posStr + "\n" +
+         "Volume  : " + volStr + "\n" +
+         "Stoch K : " + stochStr + "\n" +
+         "ATM     : " + atmStr + "\n" +
+         "Position: " + trailStr
+
+    var table dash = table.new(position.top_right, 1, 1,
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray,  30),
+         border_width = 1,
+         frame_color  = color.new(color.gray,  20),
+         frame_width  = 1)
+    table.cell(dash, 0, 0, dashText,
+         text_color = color.white,
+         text_size  = size.small,
+         bgcolor    = color.new(color.black, 15))
+
+// ===========================================================
+// CONDITION DEBUG TABLE
+// ===========================================================
+
+if i_showDebug
+    string dbg =
+         "-- LONG CONDITIONS --\n" +
+         fmtOk(not inOvernight) + " Not in overnight\n" +
+         fmtOk(hasRange)        + " Range available\n" +
+         fmtOk(bullBreakout)    + " Price > ON High (" + fmtP(overnightHigh) + ")\n" +
+         fmtOk(volConfirm)      + " Vol spike (need +" + str.tostring(i_volMinPct) + "%)\n" +
+         fmtOk(stochBullOk)     + " Stoch K > " + str.tostring(i_stochLevel) + " (" + str.tostring(math.round(stochK, 1)) + ")\n" +
+         "-- SHORT CONDITIONS --\n" +
+         fmtOk(not inOvernight) + " Not in overnight\n" +
+         fmtOk(hasRange)        + " Range available\n" +
+         fmtOk(bearBreakout)    + " Price < ON Low (" + fmtP(overnightLow) + ")\n" +
+         fmtOk(volConfirm)      + " Vol spike (need +" + str.tostring(i_volMinPct) + "%)\n" +
+         fmtOk(stochBearOk)     + " Stoch K < " + str.tostring(i_stochLevel) + " (" + str.tostring(math.round(stochK, 1)) + ")"
+
+    var table tbl = table.new(position.bottom_left, 1, 1,
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray,  30),
+         border_width = 1)
+    table.cell(tbl, 0, 0, dbg,
+         text_color = color.white,
+         text_size  = size.tiny,
+         bgcolor    = color.new(color.black, 15))
+
+// ===========================================================
+// ALERTS  (fire across all session times)
+// ===========================================================
+
+alertcondition(longSignal,
+     title   = "OCB Long Breakout",
+     message = "OCB LONG | {{ticker}} broke above overnight high @ {{close}} | Vol spike + Stoch bull | {{time}}")
+alertcondition(shortSignal,
+     title   = "OCB Short Breakout",
+     message = "OCB SHORT | {{ticker}} broke below overnight low @ {{close}} | Vol spike + Stoch bear | {{time}}")
+alertcondition(bullBreakout and not volConfirm,
+     title   = "OCB Bull Break — Vol Unconfirmed",
+     message = "OCB Bull breakout but VOLUME NOT CONFIRMED yet | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bearBreakout and not volConfirm,
+     title   = "OCB Bear Break — Vol Unconfirmed",
+     message = "OCB Bear breakout but VOLUME NOT CONFIRMED yet | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(acceptedAbove and not acceptedAbove[1],
+     title   = "OCB ATM Accept Above",
+     message = "ATM: Price accepted ABOVE overnight range | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(acceptedBelow and not acceptedBelow[1],
+     title   = "OCB ATM Accept Below",
+     message = "ATM: Price accepted BELOW overnight range | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(inLong and close < trailStopLong,
+     title   = "OCB Trail Stop Hit (Long)",
+     message = "OCB: Trailing stop hit on LONG | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(inShort and close > trailStopShort,
+     title   = "OCB Trail Stop Hit (Short)",
+     message = "OCB: Trailing stop hit on SHORT | {{ticker}} @ {{close}} | {{time}}")
