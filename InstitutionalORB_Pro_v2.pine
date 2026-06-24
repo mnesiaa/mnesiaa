@@ -422,10 +422,10 @@ shortVWAPok = not i_useVWAP or close < vwap
 longBase  = longBreak  or longRetest
 shortBase = shortBreak or shortRetest
 
-longRaw  = longBase  and inSession and not inLunch and allowTrade
-     and longGradeOk  and longVWAPok  and cvdGateLong  and not nearAnyKL
-shortRaw = shortBase and inSession and not inLunch and allowTrade
-     and shortGradeOk and shortVWAPok and cvdGateShort and not nearAnyKL
+longRaw  = longBase  and inSession and not inLunch and allowTrade and
+     longGradeOk  and longVWAPok  and cvdGateLong  and not nearAnyKL
+shortRaw = shortBase and inSession and not inLunch and allowTrade and
+     shortGradeOk and shortVWAPok and cvdGateShort and not nearAnyKL
 
 var bool longFiredToday  = false
 var bool shortFiredToday = false
