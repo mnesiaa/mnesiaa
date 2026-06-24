@@ -1,0 +1,729 @@
+//@version=6
+indicator(
+     title            = "Institutional ORB Pro v2.0",
+     shorttitle       = "IORBP v2.0",
+     overlay          = true,
+     max_lines_count  = 500,
+     max_labels_count = 500,
+     max_boxes_count  = 50)
+
+// ═══════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════
+
+// ORB
+i_orbStart   = input.int(930,  "ORB Start HHMM (EST)",  group = "ORB")
+i_orbEnd     = input.int(945,  "ORB End HHMM (EST)",    group = "ORB")
+i_showORB    = input.bool(true, "Show ORB Levels",       group = "ORB")
+
+// Session Windows
+i_amStart    = input.int(930,  "AM Session Start HHMM",  group = "Session")
+i_amEnd      = input.int(1130, "AM Session End HHMM",    group = "Session")
+i_pmStart    = input.int(1330, "PM Session Start HHMM",  group = "Session")
+i_pmEnd      = input.int(1530, "PM Session End HHMM",    group = "Session")
+i_usePM      = input.bool(false, "Enable PM Session Window", group = "Session")
+
+// Market Structure
+i_nearLen    = input.int(15, "Near Structure Lookback",  minval = 5,  group = "Structure")
+i_farLen     = input.int(40, "Far Structure Lookback",   minval = 10, group = "Structure")
+i_sweepWin   = input.int(3,  "Sweep Window (bars)",      minval = 1,  group = "Structure")
+
+// VWAP / Trend
+i_useVWAP    = input.bool(true, "Require VWAP Alignment", group = "VWAP / Trend")
+i_showVWAP   = input.bool(true, "Show VWAP",              group = "VWAP / Trend")
+i_showEMAs   = input.bool(true, "Show EMAs (9/20/50)",    group = "VWAP / Trend")
+
+// RSI
+i_biasTF     = input.string("5", "Bias RSI Timeframe",
+     options = ["1","5","15"], group = "RSI")
+i_biasRsiLen = input.int(14, "Bias RSI Length",  minval = 2, group = "RSI")
+i_entRsiLen  = input.int(9,  "Entry RSI Length", minval = 2, group = "RSI")
+i_rsiBull    = input.float(50.0, "RSI Bull Threshold", step = 0.5, group = "RSI")
+i_rsiBear    = input.float(50.0, "RSI Bear Threshold", step = 0.5, group = "RSI")
+
+// Volume
+i_volLen     = input.int(10,    "Vol Avg Lookback (bars)", minval = 3,   group = "Volume")
+i_volThresh  = input.float(1.2, "Vol Spike Threshold (x avg)", minval = 1.0, step = 0.1, group = "Volume")
+i_volHighEnv = input.float(1.5, "High-Vol Regime Threshold",   minval = 1.0, step = 0.1, group = "Volume")
+
+// Order Flow / CVD
+i_useCVD     = input.bool(true, "Use CVD as Signal Gate", group = "Order Flow")
+i_deltaLen   = input.int(8, "Delta EMA Smoothing", minval = 1, group = "Order Flow")
+
+// ATR / Risk
+i_atrLen     = input.int(14,    "ATR Length",          minval = 2,   group = "Risk")
+i_stopMode   = input.string("ORB Opposite", "Stop Mode",
+     options = ["ORB Opposite", "Signal Candle", "ATR Based"], group = "Risk")
+i_atrBuf     = input.float(0.5, "ATR Stop Buffer Multiplier", minval = 0.1, step = 0.1, group = "Risk")
+i_tp1R       = input.float(1.0, "TP1 R-Multiple", minval = 0.5,  step = 0.25, group = "Risk")
+i_tp2R       = input.float(2.0, "TP2 R-Multiple", minval = 1.0,  step = 0.25, group = "Risk")
+i_tp3R       = input.float(3.0, "TP3 R-Multiple", minval = 1.5,  step = 0.25, group = "Risk")
+i_lineExt    = input.int(40, "Level Line Extension (bars)", minval = 5, group = "Risk")
+i_trailMult  = input.float(1.0, "ATR Trailing Stop Multiplier", minval = 0.25, step = 0.25, group = "Risk")
+
+// Gamma Levels (manual — trader inputs options market maker levels)
+i_useGamma   = input.bool(false, "Enable Gamma Level Filter", group = "Gamma / SR")
+i_gammaLvl   = input.float(0.0,  "Gamma Flip / POC Level",   group = "Gamma / SR")
+i_sr1        = input.float(0.0,  "Key Support / Resistance 1", group = "Gamma / SR")
+i_sr2        = input.float(0.0,  "Key Support / Resistance 2", group = "Gamma / SR")
+i_showSR     = input.bool(false,  "Show S/R and Gamma Lines",  group = "Gamma / SR")
+
+// Grade Filter
+i_minGrade   = input.string("B", "Minimum Setup Grade to Trade",
+     options = ["A+", "A", "B", "C"], group = "Grade Filter")
+i_onePerDay  = input.bool(true, "One Signal Per Direction Per Day", group = "Grade Filter")
+
+// Visual
+i_showBOS    = input.bool(true,  "Show BOS / CHoCH Labels", group = "Visual")
+i_showStr    = input.bool(true,  "Show Structure Levels",   group = "Visual")
+i_showGrade  = input.bool(true,  "Show Grade Label on Entry", group = "Visual")
+i_showDash   = input.bool(true,  "Show Dashboard",            group = "Visual")
+i_showDebug  = input.bool(false, "Show Debug Score Table",    group = "Visual")
+
+// ═══════════════════════════════════════════════════════════
+// HELPER FUNCTIONS  (defined first — used throughout)
+// ═══════════════════════════════════════════════════════════
+
+fmtP(float v) =>
+    str.tostring(math.round(v, 2))
+
+fmtOk(bool b) =>
+    b ? "[Y]" : "[N]"
+
+// Convert grade string to sortable integer
+gradeNum(string g) =>
+    g == "A+" ? 4 : g == "A" ? 3 : g == "B" ? 2 : 1
+
+// Grade → display color
+gradeCol(string g) =>
+    g == "A+" ? color.lime   :
+     g == "A"  ? color.green  :
+     g == "B"  ? color.yellow :
+                 color.orange
+
+// ═══════════════════════════════════════════════════════════
+// TIME / SESSION
+// ═══════════════════════════════════════════════════════════
+
+barHHMM   = hour(time, "America/New_York") * 100 + minute(time, "America/New_York")
+newDay    = ta.change(time("D")) != 0
+
+inORBWin  = barHHMM >= i_orbStart  and barHHMM < i_orbEnd
+inAM      = barHHMM >= i_amStart   and barHHMM < i_amEnd
+inPM      = i_usePM and barHHMM >= i_pmStart and barHHMM < i_pmEnd
+inSession = inAM or inPM
+inLunch   = barHHMM >= 1130 and barHHMM < 1330
+
+// ═══════════════════════════════════════════════════════════
+// BASE INDICATORS
+// ═══════════════════════════════════════════════════════════
+
+atr    = ta.atr(i_atrLen)
+atrSMA = ta.sma(atr, 20)
+
+ema9   = ta.ema(close, 9)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+
+vwap   = ta.vwap(hlc3)
+
+// Volume: compare current bar against prior N bars (no look-ahead)
+avgVol   = ta.sma(volume[1], i_volLen)
+relVol   = volume / math.max(avgVol, 1.0)
+volSpike = relVol >= i_volThresh
+
+// ═══════════════════════════════════════════════════════════
+// MARKET REGIME DETECTION
+// ADX for trend strength, ATR ratio for volatility environment
+// ═══════════════════════════════════════════════════════════
+
+[dmPlus, dmMinus, adxVal] = ta.dmi(14, 14)
+
+diTrendBull = dmPlus  > dmMinus   // DI+ dominant = directional buy pressure
+diTrendBear = dmMinus > dmPlus    // DI- dominant = directional sell pressure
+
+atrRatio    = atr / math.max(atrSMA, 0.001)
+highVolEnv  = atrRatio >= i_volHighEnv
+lowVolEnv   = atrRatio < 0.75
+trendingMkt = adxVal >= 22
+rangingMkt  = adxVal < 18
+
+// ORB breakouts fail in low-ADX choppy conditions.
+// Only trade when trending or in a high-vol spike (potential range expansion).
+regime =
+     highVolEnv  ? "HIGH VOL" :
+     trendingMkt ? "TRENDING" :
+     rangingMkt  ? "RANGING"  : "NEUTRAL"
+
+allowTrade = not rangingMkt or highVolEnv
+
+// ═══════════════════════════════════════════════════════════
+// ORB  (Opening Range Breakout)
+// ═══════════════════════════════════════════════════════════
+
+var float orbHigh   = na
+var float orbLow    = na
+var bool  orbLocked = false
+
+if newDay
+    orbHigh   := na
+    orbLow    := na
+    orbLocked := false
+
+if inORBWin and not orbLocked
+    orbHigh := na(orbHigh) ? high : math.max(orbHigh, high)
+    orbLow  := na(orbLow)  ? low  : math.min(orbLow,  low)
+
+if not inORBWin and not na(orbHigh) and not orbLocked
+    orbLocked := true
+
+// ═══════════════════════════════════════════════════════════
+// MULTI-TIMEFRAME RSI  (lookahead_off = no repainting)
+// ═══════════════════════════════════════════════════════════
+
+biasRSI  = request.security(syminfo.tickerid, i_biasTF,
+     ta.rsi(close, i_biasRsiLen), barmerge.gaps_off, barmerge.lookahead_off)
+entryRSI = ta.rsi(close, i_entRsiLen)
+
+rsiBullBias   = biasRSI  > i_rsiBull
+rsiBearBias   = biasRSI  < i_rsiBear
+rsiEntryLong  = entryRSI > i_rsiBull
+rsiEntryShort = entryRSI < i_rsiBear
+
+// ═══════════════════════════════════════════════════════════
+// MARKET STRUCTURE  (zero-lag: [1] offsets on all lookbacks)
+// ═══════════════════════════════════════════════════════════
+
+nearHigh = ta.highest(high, i_nearLen)[1]
+nearLow  = ta.lowest (low,  i_nearLen)[1]
+farHigh  = ta.highest(high, i_farLen)[1]
+farLow   = ta.lowest (low,  i_farLen)[1]
+
+var int  trendDir  = 0
+var bool bullBOS   = false
+var bool bearBOS   = false
+var bool bullCHoCH = false
+var bool bearCHoCH = false
+
+bullBOS   := false
+bearBOS   := false
+bullCHoCH := false
+bearCHoCH := false
+
+crossAboveFar = close > farHigh and close[1] <= farHigh
+crossBelowFar = close < farLow  and close[1] >= farLow
+
+if crossAboveFar
+    if trendDir >= 0
+        bullBOS := true
+    else
+        bullCHoCH := true
+    trendDir := 1
+
+if crossBelowFar
+    if trendDir <= 0
+        bearBOS := true
+    else
+        bearCHoCH := true
+    trendDir := -1
+
+recentBullStr = ta.barssince(bullBOS or bullCHoCH) <= 5
+recentBearStr = ta.barssince(bearBOS or bearCHoCH) <= 5
+
+// ═══════════════════════════════════════════════════════════
+// LIQUIDITY SWEEPS
+// Wick pierces structure, close reclaims → stop hunt detected
+// ═══════════════════════════════════════════════════════════
+
+bullSweep = low  < nearLow  and close > nearLow
+bearSweep = high > nearHigh and close < nearHigh
+
+recentBullSweep = ta.barssince(bullSweep) <= i_sweepWin
+recentBearSweep = ta.barssince(bearSweep) <= i_sweepWin
+
+// ═══════════════════════════════════════════════════════════
+// CVD / ORDER FLOW PROXY
+// Buy/sell volume estimated from candle position, EMA-smoothed
+// ═══════════════════════════════════════════════════════════
+
+barRange     = math.max(high - low, 1e-9)
+buyVolEst    = volume * math.max(close - low,   0.0) / barRange
+sellVolEst   = volume * math.max(high - close,  0.0) / barRange
+rawDelta     = buyVolEst - sellVolEst
+deltaEMA     = ta.ema(rawDelta, i_deltaLen)
+
+var float cvd = 0.0
+if newDay
+    cvd := rawDelta
+else
+    cvd += rawDelta
+
+cvdBullActual = cvd > cvd[1] and deltaEMA > 0
+cvdBearActual = cvd < cvd[1] and deltaEMA < 0
+
+// Gate vs. score: gate uses i_useCVD toggle; score always reflects reality
+cvdGateLong  = not i_useCVD or cvdBullActual
+cvdGateShort = not i_useCVD or cvdBearActual
+
+// ═══════════════════════════════════════════════════════════
+// BREAKOUT DETECTION  (non-repainting: compares closed bars)
+// ═══════════════════════════════════════════════════════════
+
+longBreak  = orbLocked and not na(orbHigh) and close > orbHigh and close[1] <= orbHigh
+shortBreak = orbLocked and not na(orbLow)  and close < orbLow  and close[1] >= orbLow
+
+// Arm state enables retest entries after initial break
+var bool longArmed  = false
+var bool shortArmed = false
+
+if newDay
+    longArmed  := false
+    shortArmed := false
+
+if longBreak
+    longArmed  := true
+    shortArmed := false
+if shortBreak
+    shortArmed := true
+    longArmed  := false
+
+// Retest: price pulls back to ORB level after break and holds
+longRetest  = orbLocked and longArmed  and low  <= orbHigh and close > orbHigh
+shortRetest = orbLocked and shortArmed and high >= orbLow  and close < orbLow
+
+// ═══════════════════════════════════════════════════════════
+// SETUP GRADING ENGINE  (8 factors, 0–8 score)
+//
+// A+  = 7–8   (institutional-grade: all key factors aligned)
+// A   = 5–6   (strong setup, most conditions aligned)
+// B   = 3–4   (tradeable, missing 1–2 key factors)
+// C   = 0–2   (low quality, avoid on funded accounts)
+// ═══════════════════════════════════════════════════════════
+
+// Long score factors
+sc_L_trend  = (trendDir >= 0 or ema9 > ema50) and diTrendBull ? 1 : 0
+sc_L_vwap   = close > vwap ? 1 : 0
+sc_L_vol    = volSpike ? 1 : 0
+sc_L_str    = recentBullStr ? 1 : 0
+sc_L_sweep  = recentBullSweep ? 1 : 0
+sc_L_rsi    = rsiBullBias and rsiEntryLong ? 1 : 0
+sc_L_cvd    = cvdBullActual ? 1 : 0
+sc_L_ema    = ema9 > ema20 ? 1 : 0
+
+longScore   = sc_L_trend + sc_L_vwap + sc_L_vol + sc_L_str +
+     sc_L_sweep + sc_L_rsi + sc_L_cvd + sc_L_ema
+
+longGrade   =
+     longScore >= 7 ? "A+" :
+     longScore >= 5 ? "A"  :
+     longScore >= 3 ? "B"  : "C"
+
+// Short score factors
+sc_S_trend  = (trendDir <= 0 or ema9 < ema50) and diTrendBear ? 1 : 0
+sc_S_vwap   = close < vwap ? 1 : 0
+sc_S_vol    = volSpike ? 1 : 0
+sc_S_str    = recentBearStr ? 1 : 0
+sc_S_sweep  = recentBearSweep ? 1 : 0
+sc_S_rsi    = rsiBearBias and rsiEntryShort ? 1 : 0
+sc_S_cvd    = cvdBearActual ? 1 : 0
+sc_S_ema    = ema9 < ema20 ? 1 : 0
+
+shortScore  = sc_S_trend + sc_S_vwap + sc_S_vol + sc_S_str +
+     sc_S_sweep + sc_S_rsi + sc_S_cvd + sc_S_ema
+
+shortGrade  =
+     shortScore >= 7 ? "A+" :
+     shortScore >= 5 ? "A"  :
+     shortScore >= 3 ? "B"  : "C"
+
+minGradeN    = gradeNum(i_minGrade)
+longGradeOk  = gradeNum(longGrade)  >= minGradeN
+shortGradeOk = gradeNum(shortGrade) >= minGradeN
+
+// ═══════════════════════════════════════════════════════════
+// GAMMA / KEY LEVEL PROXIMITY FILTER (optional)
+// Blocks entry within 0.1% of a user-defined gamma/POC level
+// ═══════════════════════════════════════════════════════════
+
+nearGamma =
+     i_useGamma and i_gammaLvl != 0.0
+     ? math.abs(close - i_gammaLvl) / close < 0.001
+     : false
+
+// ═══════════════════════════════════════════════════════════
+// FINAL SIGNAL LOGIC
+// All gates must pass simultaneously — no shortcuts
+// ═══════════════════════════════════════════════════════════
+
+longVWAPok  = not i_useVWAP or close > vwap
+shortVWAPok = not i_useVWAP or close < vwap
+
+longBase  = longBreak  or longRetest
+shortBase = shortBreak or shortRetest
+
+longRaw  = longBase  and inSession and not inLunch and allowTrade
+     and longGradeOk  and longVWAPok  and cvdGateLong  and not nearGamma
+shortRaw = shortBase and inSession and not inLunch and allowTrade
+     and shortGradeOk and shortVWAPok and cvdGateShort and not nearGamma
+
+var bool longFiredToday  = false
+var bool shortFiredToday = false
+
+if newDay
+    longFiredToday  := false
+    shortFiredToday := false
+
+finalLong  = longRaw  and (not i_onePerDay or not longFiredToday)
+finalShort = shortRaw and (not i_onePerDay or not shortFiredToday)
+
+if finalLong
+    longFiredToday := true
+    longArmed      := false
+if finalShort
+    shortFiredToday := true
+    shortArmed      := false
+
+// ═══════════════════════════════════════════════════════════
+// TRADE LEVELS  (Stop Loss + Take Profits)
+// ═══════════════════════════════════════════════════════════
+
+longEntry  = close
+shortEntry = close
+
+longSL =
+     i_stopMode == "ORB Opposite"  ? nz(orbLow,  low)  - atr * i_atrBuf :
+     i_stopMode == "Signal Candle" ? low  - atr * i_atrBuf :
+                                     close - atr * 1.5
+
+shortSL =
+     i_stopMode == "ORB Opposite"  ? nz(orbHigh, high) + atr * i_atrBuf :
+     i_stopMode == "Signal Candle" ? high + atr * i_atrBuf :
+                                     close + atr * 1.5
+
+longRisk   = finalLong  ? longEntry  - longSL  : na
+shortRisk  = finalShort ? shortSL - shortEntry : na
+
+validLong  = finalLong  and not na(longRisk)  and longRisk  > 0
+validShort = finalShort and not na(shortRisk) and shortRisk > 0
+
+longTP1  = validLong  ? longEntry  + longRisk  * i_tp1R : na
+longTP2  = validLong  ? longEntry  + longRisk  * i_tp2R : na
+longTP3  = validLong  ? longEntry  + longRisk  * i_tp3R : na
+
+shortTP1 = validShort ? shortEntry - shortRisk * i_tp1R : na
+shortTP2 = validShort ? shortEntry - shortRisk * i_tp2R : na
+shortTP3 = validShort ? shortEntry - shortRisk * i_tp3R : na
+
+// ═══════════════════════════════════════════════════════════
+// TRAILING STOP
+// Ratchets in favor of the trade; exits when price reverses
+// ═══════════════════════════════════════════════════════════
+
+var float trailLong  = na
+var float trailShort = na
+var bool  inLong     = false
+var bool  inShort    = false
+
+if validLong
+    inLong     := true
+    inShort    := false
+    trailLong  := close - atr * i_trailMult
+    trailShort := na
+
+if inLong and not validLong
+    trailLong := math.max(nz(trailLong, close - atr * i_trailMult),
+                          close - atr * i_trailMult)
+    if close < trailLong
+        inLong := false
+
+if validShort
+    inShort    := true
+    inLong     := false
+    trailShort := close + atr * i_trailMult
+    trailLong  := na
+
+if inShort and not validShort
+    trailShort := math.min(nz(trailShort, close + atr * i_trailMult),
+                           close + atr * i_trailMult)
+    if close > trailShort
+        inShort := false
+
+// ═══════════════════════════════════════════════════════════
+// DRAW TRADE LEVELS  (SL + TP1/2/3 lines and labels)
+// Old objects deleted on each new signal to keep chart clean
+// ═══════════════════════════════════════════════════════════
+
+var line  ln_SL  = na
+var line  ln_TP1 = na
+var line  ln_TP2 = na
+var line  ln_TP3 = na
+var label lb_SL  = na
+var label lb_TP1 = na
+var label lb_TP2 = na
+var label lb_TP3 = na
+
+if validLong or validShort
+    line.delete(ln_SL)
+    line.delete(ln_TP1)
+    line.delete(ln_TP2)
+    line.delete(ln_TP3)
+    label.delete(lb_SL)
+    label.delete(lb_TP1)
+    label.delete(lb_TP2)
+    label.delete(lb_TP3)
+
+    int   x0  = bar_index
+    int   x1  = bar_index + i_lineExt
+    float sl  = validLong ? longSL   : shortSL
+    float tp1 = validLong ? longTP1  : shortTP1
+    float tp2 = validLong ? longTP2  : shortTP2
+    float tp3 = validLong ? longTP3  : shortTP3
+
+    ln_SL  := line.new(x0, sl,  x1, sl,  color = color.red,                  width = 2, style = line.style_dashed, xloc = xloc.bar_index)
+    ln_TP1 := line.new(x0, tp1, x1, tp1, color = color.new(color.lime,  0),  width = 2, xloc = xloc.bar_index)
+    ln_TP2 := line.new(x0, tp2, x1, tp2, color = color.new(color.green, 20), width = 2, xloc = xloc.bar_index)
+    ln_TP3 := line.new(x0, tp3, x1, tp3, color = color.new(color.teal,  0),  width = 2, xloc = xloc.bar_index)
+
+    lb_SL  := label.new(x1, sl,  "SL  " + fmtP(sl),  color = color.red,                  textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+    lb_TP1 := label.new(x1, tp1, "TP1 " + fmtP(tp1), color = color.new(color.lime,  0),  textcolor = color.black, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+    lb_TP2 := label.new(x1, tp2, "TP2 " + fmtP(tp2), color = color.new(color.green, 20), textcolor = color.black, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+    lb_TP3 := label.new(x1, tp3, "TP3 " + fmtP(tp3), color = color.new(color.teal,  0),  textcolor = color.white, style = label.style_label_left, size = size.small, xloc = xloc.bar_index)
+
+// ═══════════════════════════════════════════════════════════
+// PLOTS
+// ═══════════════════════════════════════════════════════════
+
+// VWAP
+plot(i_showVWAP ? vwap  : na, "VWAP",   color = color.new(color.orange, 0), linewidth = 2)
+
+// EMAs
+plot(i_showEMAs ? ema9  : na, "EMA 9",  color = color.new(color.yellow, 0), linewidth = 1)
+plot(i_showEMAs ? ema20 : na, "EMA 20", color = color.new(color.orange, 0), linewidth = 1)
+plot(i_showEMAs ? ema50 : na, "EMA 50", color = color.new(color.red,    0), linewidth = 2)
+
+// ORB levels
+plot(i_showORB and orbLocked ? orbHigh : na, "ORB High",
+     color = color.new(color.lime, 0), linewidth = 2, style = plot.style_linebr)
+plot(i_showORB and orbLocked ? orbLow  : na, "ORB Low",
+     color = color.new(color.red,  0), linewidth = 2, style = plot.style_linebr)
+
+// Rolling structure levels
+plot(i_showStr ? nearHigh : na, "Near High",
+     color = color.new(color.silver, 60), style = plot.style_stepline, linewidth = 1)
+plot(i_showStr ? nearLow  : na, "Near Low",
+     color = color.new(color.silver, 60), style = plot.style_stepline, linewidth = 1)
+
+// Key S/R and gamma lines (static horizontal lines)
+hline(i_showSR and i_sr1 != 0.0 ? i_sr1 : na,    "S/R Level 1",   color = color.new(color.purple, 30), linestyle = hline.style_dotted, linewidth = 1)
+hline(i_showSR and i_sr2 != 0.0 ? i_sr2 : na,    "S/R Level 2",   color = color.new(color.purple, 30), linestyle = hline.style_dotted, linewidth = 1)
+hline(i_showSR and i_useGamma and i_gammaLvl != 0.0 ? i_gammaLvl : na, "Gamma Flip",
+     color = color.new(color.fuchsia, 20), linestyle = hline.style_dashed, linewidth = 2)
+
+// Session background highlight
+bgcolor(inSession ? color.new(color.blue, 95) : na, title = "Session BG")
+
+// BOS / CHoCH labels
+plotshape(i_showBOS and bullBOS,
+     location = location.belowbar, style = shape.labelup,
+     color = color.new(color.lime,    0), text = "BOS",   textcolor = color.black, size = size.tiny, title = "Bull BOS")
+plotshape(i_showBOS and bearBOS,
+     location = location.abovebar, style = shape.labeldown,
+     color = color.new(color.red,     0), text = "BOS",   textcolor = color.white, size = size.tiny, title = "Bear BOS")
+plotshape(i_showBOS and bullCHoCH,
+     location = location.belowbar, style = shape.labelup,
+     color = color.new(color.aqua,    0), text = "CHoCH", textcolor = color.black, size = size.tiny, title = "Bull CHoCH")
+plotshape(i_showBOS and bearCHoCH,
+     location = location.abovebar, style = shape.labeldown,
+     color = color.new(color.fuchsia, 0), text = "CHoCH", textcolor = color.white, size = size.tiny, title = "Bear CHoCH")
+
+// Sweep markers
+plotshape(bullSweep,
+     location = location.belowbar, style = shape.circle,
+     color = color.new(color.lime, 30), size = size.tiny, title = "Bull Sweep")
+plotshape(bearSweep,
+     location = location.abovebar, style = shape.circle,
+     color = color.new(color.red,  30), size = size.tiny, title = "Bear Sweep")
+
+// Entry triangles
+plotshape(finalLong,
+     location = location.belowbar, style = shape.triangleup,
+     color = color.new(color.lime, 0), size = size.normal, title = "Long Entry")
+plotshape(finalShort,
+     location = location.abovebar, style = shape.triangledown,
+     color = color.new(color.red,  0), size = size.normal, title = "Short Entry")
+
+// Trailing stop
+plot(inLong  ? trailLong  : na, "Trail Stop (Long)",
+     color = color.new(color.lime, 20), style = plot.style_linebr, linewidth = 2)
+plot(inShort ? trailShort : na, "Trail Stop (Short)",
+     color = color.new(color.red,  20), style = plot.style_linebr, linewidth = 2)
+
+// ═══════════════════════════════════════════════════════════
+// GRADE LABEL ON ENTRY
+// Shows grade, score, entry reason, SL, and regime
+// ═══════════════════════════════════════════════════════════
+
+if i_showGrade and finalLong
+    string why =
+         (sc_L_trend  == 1 ? "Trend " : "") +
+         (sc_L_vwap   == 1 ? "VWAP "  : "") +
+         (sc_L_sweep  == 1 ? "Sweep " : "") +
+         (sc_L_str    == 1 ? "BOS "   : "") +
+         (sc_L_vol    == 1 ? "Vol "   : "")
+    label.new(bar_index, low - atr * 1.2,
+         longGrade + " LONG  " + str.tostring(longScore) + "/8\n" +
+         why + "\n" +
+         "Entry " + fmtP(longEntry) + "  SL " + fmtP(longSL) + "\n" +
+         regime + "  ADX " + str.tostring(math.round(adxVal, 0)),
+         color     = gradeCol(longGrade),
+         textcolor = color.black,
+         style     = label.style_label_up,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+if i_showGrade and finalShort
+    string why =
+         (sc_S_trend  == 1 ? "Trend " : "") +
+         (sc_S_vwap   == 1 ? "VWAP "  : "") +
+         (sc_S_sweep  == 1 ? "Sweep " : "") +
+         (sc_S_str    == 1 ? "BOS "   : "") +
+         (sc_S_vol    == 1 ? "Vol "   : "")
+    label.new(bar_index, high + atr * 1.2,
+         shortGrade + " SHORT " + str.tostring(shortScore) + "/8\n" +
+         why + "\n" +
+         "Entry " + fmtP(shortEntry) + "  SL " + fmtP(shortSL) + "\n" +
+         regime + "  ADX " + str.tostring(math.round(adxVal, 0)),
+         color     = gradeCol(shortGrade),
+         textcolor = color.black,
+         style     = label.style_label_down,
+         size      = size.small,
+         xloc      = xloc.bar_index)
+
+// ═══════════════════════════════════════════════════════════
+// DASHBOARD
+// ═══════════════════════════════════════════════════════════
+
+if i_showDash
+    string sesStr  = inSession ? (inAM ? "AM  ACTIVE" : "PM  ACTIVE") :
+                     inLunch   ? "LUNCH — NO TRADE" : "CLOSED"
+    string trdStr  = trendDir ==  1 ? "BULL" : trendDir == -1 ? "BEAR" : "FLAT"
+    string orbStr  = orbLocked
+         ? "H " + fmtP(orbHigh) + "  L " + fmtP(orbLow)
+         : "Building..."
+    string volStr  = str.tostring(math.round(relVol, 1)) + "x" +
+         (volSpike ? "  SPIKE" : "")
+    string rsiStr  = str.tostring(math.round(biasRSI, 1)) +
+         (rsiBullBias ? "  BULL" : rsiBearBias ? "  BEAR" : "  FLAT")
+    string cvdStr  = cvdBullActual ? "BULL" : cvdBearActual ? "BEAR" : "FLAT"
+    string posStr  = inLong  ? "LONG   trail " + fmtP(trailLong)  :
+                     inShort ? "SHORT  trail " + fmtP(trailShort) : "FLAT"
+    string grLStr  = longGrade  + "  (" + str.tostring(longScore)  + "/8)"
+    string grSStr  = shortGrade + "  (" + str.tostring(shortScore) + "/8)"
+
+    string dash =
+         "══════ IORBP v2.0 ══════\n" +
+         "Session  : " + sesStr  + "\n" +
+         "Regime   : " + regime  + "  ADX " + str.tostring(math.round(adxVal, 1)) + "\n" +
+         "Trend    : " + trdStr  + "  DI " + (diTrendBull ? "+" : "-") + "\n" +
+         "ORB      : " + orbStr  + "\n" +
+         "VWAP     : " + (close > vwap ? "ABOVE" : "BELOW") + "\n" +
+         "RSI(TF)  : " + rsiStr  + "\n" +
+         "Volume   : " + volStr  + "\n" +
+         "CVD      : " + cvdStr  + "\n" +
+         "L Grade  : " + grLStr  + "\n" +
+         "S Grade  : " + grSStr  + "\n" +
+         "Position : " + posStr
+
+    var table dtbl = table.new(position.top_right, 1, 1,
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray,  30),
+         border_width = 1,
+         frame_color  = color.new(color.gray,  20),
+         frame_width  = 1)
+    table.cell(dtbl, 0, 0, dash,
+         text_color = color.white,
+         text_size  = size.small,
+         bgcolor    = color.new(color.black, 15))
+
+// ═══════════════════════════════════════════════════════════
+// DEBUG SCORE TABLE  (toggle on to see every condition)
+// ═══════════════════════════════════════════════════════════
+
+if i_showDebug
+    int bsSince = nz(ta.barssince(bullSweep), 999)
+    int beSince = nz(ta.barssince(bearSweep), 999)
+
+    string dbg =
+         "─── LONG  " + longGrade  + "  " + str.tostring(longScore)  + "/8 ───\n" +
+         fmtOk(sc_L_trend == 1) + " Trend+DI bull\n"  +
+         fmtOk(sc_L_vwap  == 1) + " Above VWAP\n"      +
+         fmtOk(sc_L_vol   == 1) + " Vol " + str.tostring(math.round(relVol, 1)) + "x spike\n" +
+         fmtOk(sc_L_str   == 1) + " Bull BOS/CHoCH\n"  +
+         fmtOk(sc_L_sweep == 1) + " Bull sweep (" + str.tostring(bsSince) + "b)\n" +
+         fmtOk(sc_L_rsi   == 1) + " RSI " + str.tostring(math.round(biasRSI, 1)) + "/" + str.tostring(math.round(entryRSI, 1)) + "\n" +
+         fmtOk(sc_L_cvd   == 1) + " CVD bull\n"         +
+         fmtOk(sc_L_ema   == 1) + " EMA9>20\n"          +
+         "─── SHORT " + shortGrade + "  " + str.tostring(shortScore) + "/8 ───\n" +
+         fmtOk(sc_S_trend == 1) + " Trend+DI bear\n"   +
+         fmtOk(sc_S_vwap  == 1) + " Below VWAP\n"      +
+         fmtOk(sc_S_vol   == 1) + " Vol spike\n"        +
+         fmtOk(sc_S_str   == 1) + " Bear BOS/CHoCH\n"  +
+         fmtOk(sc_S_sweep == 1) + " Bear sweep (" + str.tostring(beSince) + "b)\n" +
+         fmtOk(sc_S_rsi   == 1) + " RSI bear\n"         +
+         fmtOk(sc_S_cvd   == 1) + " CVD bear\n"         +
+         fmtOk(sc_S_ema   == 1) + " EMA9<20\n"          +
+         "── Gates ──\n"                                  +
+         fmtOk(inSession)        + " Session\n"           +
+         fmtOk(not inLunch)      + " Not lunch\n"         +
+         fmtOk(allowTrade)       + " Regime OK (" + regime + ")\n" +
+         fmtOk(orbLocked)        + " ORB locked"
+
+    var table dbgtbl = table.new(position.bottom_left, 1, 1,
+         bgcolor      = color.new(color.black, 10),
+         border_color = color.new(color.gray,  30),
+         border_width = 1)
+    table.cell(dbgtbl, 0, 0, dbg,
+         text_color = color.white,
+         text_size  = size.tiny,
+         bgcolor    = color.new(color.black, 15))
+
+// ═══════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════
+
+alertcondition(finalLong,
+     title   = "IORBP Long",
+     message = "IORBP LONG | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(finalShort,
+     title   = "IORBP Short",
+     message = "IORBP SHORT | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(finalLong and longGrade == "A+",
+     title   = "IORBP A+ Long",
+     message = "IORBP A+ LONG — premium setup | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(finalShort and shortGrade == "A+",
+     title   = "IORBP A+ Short",
+     message = "IORBP A+ SHORT — premium setup | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(bullBOS,
+     title   = "IORBP Bull BOS",
+     message = "Bull BOS confirmed | {{ticker}} @ {{close}}")
+alertcondition(bearBOS,
+     title   = "IORBP Bear BOS",
+     message = "Bear BOS confirmed | {{ticker}} @ {{close}}")
+alertcondition(bullSweep,
+     title   = "IORBP Bull Sweep",
+     message = "Bull liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(bearSweep,
+     title   = "IORBP Bear Sweep",
+     message = "Bear liquidity sweep | {{ticker}} @ {{close}}")
+alertcondition(inLong and close < trailLong,
+     title   = "IORBP Trail Stop Hit (Long)",
+     message = "Trail stop hit on LONG | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(inShort and close > trailShort,
+     title   = "IORBP Trail Stop Hit (Short)",
+     message = "Trail stop hit on SHORT | {{ticker}} @ {{close}} | {{time}}")
+alertcondition(regime == "RANGING",
+     title   = "IORBP Regime: Ranging",
+     message = "Market entered RANGING regime — ORB signals paused | {{ticker}}")
+alertcondition(regime == "HIGH VOL",
+     title   = "IORBP Regime: High Vol",
+     message = "HIGH VOLATILITY regime — use wider stops | {{ticker}}")
